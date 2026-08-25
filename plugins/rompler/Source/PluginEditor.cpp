@@ -469,12 +469,13 @@ void Keyboard::setKeyRange (int lowNote, int numKeys)
     lit_.clear();
     numWhite_ = 0;
 
-    const int blackAfter[7] = { 1, 1, 0, 1, 1, 1, 0 };   // after C D E F G A B
+    // Chromatic black-key pattern: C#=1, D#=3, F#=6, G#=8, A#=10
+    static constexpr int isBlack[12] = { 0, 1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 0 };
     for (int i = 0; i < numKeys; ++i)
     {
         const int note = lowNote + i;
-        const int pc = note % 7;
-        if (blackAfter[pc] == 1)
+        const int pc = note % 12;
+        if (isBlack[pc])
             keys_.push_back ({ note, true, numWhite_ - 1 });
         else
         {
@@ -870,7 +871,7 @@ RomplerEditor::RomplerEditor (RomplerProcessor& processorRef)
     refreshPresetList();
 
     addAndMakeVisible (keyboard_);
-    keyboard_.setKeyRange (36, 36);   // C2..C5
+    keyboard_.setKeyRange (36, 36);   // C2..B4
     keyboard_.setNoteCallback ([this] (int note, bool on) {
         processor_.postNote (note, on, 100);
     });
