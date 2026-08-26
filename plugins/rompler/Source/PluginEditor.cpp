@@ -754,6 +754,7 @@ RomplerEditor::RomplerEditor (RomplerProcessor& processorRef)
       processor_ (processorRef),
       voiceBox_ ("VOICE"),
       busBox_ ("BUS"),
+      envBox_ ("ENVELOPE"),
       fxBox_ ("FX")
 {
     addAndMakeVisible (brandTitle_);
@@ -776,6 +777,7 @@ RomplerEditor::RomplerEditor (RomplerProcessor& processorRef)
 
     addAndMakeVisible (voiceBox_);
     addAndMakeVisible (busBox_);
+    addAndMakeVisible (envBox_);
     addAndMakeVisible (fxBox_);
 
     auto& apvts = processor_.getValueTreeState();
@@ -796,6 +798,10 @@ RomplerEditor::RomplerEditor (RomplerProcessor& processorRef)
     controls_[14] = std::make_unique<Knob>   (*dynamic_cast<juce::RangedAudioParameter*> (apvts.getParameter (ParamIDs::fxReverbRoom)));
     controls_[15] = std::make_unique<Knob>   (*dynamic_cast<juce::RangedAudioParameter*> (apvts.getParameter (ParamIDs::fxReverbDamp)));
     controls_[16] = std::make_unique<Knob>   (*dynamic_cast<juce::RangedAudioParameter*> (apvts.getParameter (ParamIDs::fxReverbMix)));
+    controls_[17] = std::make_unique<Knob>   (*dynamic_cast<juce::RangedAudioParameter*> (apvts.getParameter (ParamIDs::envAttack)));
+    controls_[18] = std::make_unique<Knob>   (*dynamic_cast<juce::RangedAudioParameter*> (apvts.getParameter (ParamIDs::envDecay)));
+    controls_[19] = std::make_unique<Knob>   (*dynamic_cast<juce::RangedAudioParameter*> (apvts.getParameter (ParamIDs::envSustain)));
+    controls_[20] = std::make_unique<Knob>   (*dynamic_cast<juce::RangedAudioParameter*> (apvts.getParameter (ParamIDs::envRelease)));
     for (auto& c : controls_)
     {
         if (c)
@@ -834,6 +840,10 @@ RomplerEditor::RomplerEditor (RomplerProcessor& processorRef)
     setKnobLabel (controls_[14], "REV ROOM");
     setKnobLabel (controls_[15], "REV DAMP");
     setKnobLabel (controls_[16], "REV MIX");
+    setKnobLabel (controls_[17], "ATK");
+    setKnobLabel (controls_[18], "DEC");
+    setKnobLabel (controls_[19], "SUS");
+    setKnobLabel (controls_[20], "REL");
 
     // Dock: soundfont display + bank/program + load + peak meter.
     addAndMakeVisible (sfLabel_);
@@ -876,7 +886,7 @@ RomplerEditor::RomplerEditor (RomplerProcessor& processorRef)
         processor_.postNote (note, on, 100);
     });
 
-    setSize (820, 820);
+    setSize (820, 940);
 
     startTimerHz (20);
 }
@@ -915,6 +925,15 @@ void RomplerEditor::resized()
 
     layoutVoiceControls (voiceBox_.getBounds().reduced (10, 12).withTop (voiceBox_.getY() + 18));
     layoutBusControls (busBox_.getBounds().reduced (10, 12).withTop (busBox_.getY() + 18));
+
+    b.removeFromTop (8);
+
+    // Envelope box spans the full width, 1 row of 4 knobs. Taller than the FX
+    // row so each knob has room for the value label underneath without clipping.
+    constexpr int envHeight = 120;
+    auto env = b.removeFromTop (envHeight);
+    envBox_.setBounds (env);
+    layoutEnvControls (envBox_.getBounds().reduced (10, 12).withTop (envBox_.getY() + 18));
 
     b.removeFromTop (8);
 
@@ -988,6 +1007,19 @@ void RomplerEditor::layoutBusControls (juce::Rectangle<int> area)
     place (8, 0, 2);   // Oversample
     place (9, 1, 0);   // Out Trim
     place (10, 1, 1);  // Mix
+}
+
+void RomplerEditor::layoutEnvControls (juce::Rectangle<int> area)
+{
+    const auto count = 4;
+    const auto cellW = area.getWidth() / count;
+    for (int i = 0; i < count; ++i)
+    {
+        const int idx = 17 + i;
+        if (controls_[static_cast<std::size_t> (idx)])
+            controls_[static_cast<std::size_t> (idx)]->setBounds (
+                area.withX (area.getX() + i * cellW).withSize (cellW, area.getHeight()).reduced (6, 2));
+    }
 }
 
 void RomplerEditor::layoutFxControls (juce::Rectangle<int> area)

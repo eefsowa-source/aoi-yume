@@ -326,10 +326,11 @@ private:
 
     SectionBox voiceBox_;
     SectionBox busBox_;
+    SectionBox envBox_;
     SectionBox fxBox_;
 
-    // Controls, in a flat list. Order: VOICE (0-5), BUS (6-10), FX (11-16).
-    std::array<std::unique_ptr<juce::Component>, 17> controls_;
+    // Controls, in a flat list. Order: VOICE (0-5), BUS (6-10), FX (11-16), ENV (17-20).
+    std::array<std::unique_ptr<juce::Component>, 21> controls_;
 
     juce::Label sfLabel_;
     juce::Label sfDisplay_;
@@ -347,6 +348,7 @@ private:
     void onLoadButtonClicked();
     void layoutVoiceControls (juce::Rectangle<int> area);
     void layoutBusControls (juce::Rectangle<int> area);
+    void layoutEnvControls (juce::Rectangle<int> area);
     void layoutFxControls (juce::Rectangle<int> area);
 
     void comboBoxChanged (juce::ComboBox*) override;

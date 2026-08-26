@@ -60,6 +60,20 @@ public:
     */
     void loadSoundFont (const juce::File& file);
 
+    /** Loads a SoundFont into a specific bank slot (0..maxBanks-1). */
+    void loadSoundFont (const juce::File& file, int bankSlot);
+
+    /** Removes the SoundFont loaded in the given bank slot. */
+    void removeBank (int bankSlot);
+
+    /** Switches the active bank slot, updating activeLoader_ for the audio thread. */
+    void switchBank (int bankSlot);
+
+    [[nodiscard]] static constexpr int getMaxBanks() noexcept { return maxBanks; }
+    [[nodiscard]] int getActiveBankSlot() const noexcept { return activeBankSlot_.load (std::memory_order_relaxed); }
+    [[nodiscard]] bool isBankLoaded (int bankSlot) const noexcept;
+    [[nodiscard]] const juce::String& getBankName (int bankSlot) const noexcept { return bankNames_[static_cast<std::size_t> (bankSlot)]; }
+
     /**
         Loads the SoundFont bundled inside the plugin bundle's Contents/Resources
         directory, if one is present. Called from prepareToPlay() on the message
@@ -69,7 +83,11 @@ public:
     */
     void loadBundledSoundFont();
 
-    [[nodiscard]] juce::String getLoadedFileName() const noexcept { return loadedFileName_; }
+    [[nodiscard]] juce::String getLoadedFileName() const noexcept
+    {
+        const int slot = activeBankSlot_.load (std::memory_order_relaxed);
+        return bankNames_[static_cast<std::size_t> (slot)];
+    }
 
     [[nodiscard]] int getPresetCount() const noexcept;
     [[nodiscard]] juce::String getPresetName (int presetIndex) const noexcept;
@@ -95,13 +113,15 @@ public:
 private:
     /** Cap on buffered message-thread note events; see postNote(). */
     static constexpr std::size_t maxQueuedNotes = 256;
+    static constexpr int maxBanks = 4;
 
     juce::AudioProcessorValueTreeState apvts_;
 
-    // sf2Loader_ is owned and replaced only on the message thread. processBlock
-    // reads activeLoader_ instead, so a load in progress never races a note-on:
-    // the pointer swap is the only thing shared, and it is atomic.
-    std::unique_ptr<SF2Loader> sf2Loader_;
+    // Multi-bank SoundFont storage. Each slot holds its own SF2Loader.
+    // activeLoader_ always points to the active slot's loader for the audio thread.
+    std::array<std::unique_ptr<SF2Loader>, maxBanks> sf2Loaders_;
+    std::array<juce::String, maxBanks> bankNames_;
+    std::atomic<int> activeBankSlot_ { 0 };
     std::atomic<SF2Loader*> activeLoader_ { nullptr };
     std::vector<std::unique_ptr<SF2Loader>> retiredLoaders_;
 
@@ -121,8 +141,6 @@ private:
     // running we drop rather than grow unbounded.
     std::queue<std::tuple<int, bool, int>> noteQueue_;
     std::mutex noteQueueMutex_;
-
-    juce::String loadedFileName_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RomplerProcessor)
 };

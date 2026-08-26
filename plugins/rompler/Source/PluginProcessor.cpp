@@ -43,23 +43,16 @@ void RomplerProcessor::prepareToPlay (double sampleRate, int maximumExpectedSamp
 void RomplerProcessor::releaseResources()
 {
     // The audio thread is guaranteed stopped here, so it is safe to retire
-    // the loaders: processBlock() can no longer read activeLoader_ between
-    // this store and the vector push below. Leaving the pointer set would
-    // hand processBlock() a dangling reference if the host restarts audio
-    // without a fresh prepareToPlay().
-    //
-    // The loader stays alive in retiredLoaders_ (never deleted here): voices
-    // may still hold const Sample* into its sample map, and the pool is only
-    // cleared after this, so no sample pointer outlives its owner.
+    // all loaders: processBlock() can no longer read activeLoader_.
     activeLoader_.store (nullptr, std::memory_order_relaxed);
-    if (sf2Loader_)
-        retiredLoaders_.push_back (std::move (sf2Loader_));
 
-    // A fresh prepareToPlay() may come with the bundle now present (late
-    // install) or a different font packaged, so allow the bundled font to be
-    // offered again on the next audio start.
+    for (auto& slot : sf2Loaders_)
+    {
+        if (slot)
+            retiredLoaders_.push_back (std::move (slot));
+    }
+
     bundledFontLoaded_ = false;
-
     voicePool_.reset();
 }
 
@@ -78,6 +71,23 @@ void RomplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     juce::ScopedNoDenormals noDenormals;
 
     buffer.clear();
+
+    // Sync the oversampling factor at the block boundary, before any early
+    // return: the reported latency must track the parameter even while no
+    // SoundFont is loaded, so the host never sees a stale PDC figure when a
+    // font appears mid-session. The BusProcessor keeps all four oversamplers
+    // prepared, so switching here never allocates; only the reported latency
+    // moves, and setLatencySamples() itself no-ops while the value is
+    // unchanged, so the host is notified exactly once per real factor change.
+    {
+        const auto osFactorParam = apvts_.getRawParameterValue (ParamIDs::busOsFactor);
+        const int requestedOsIndex = osFactorParam ? static_cast<int> (osFactorParam->load()) : cachedOsFactorIndex_;
+        if (requestedOsIndex != cachedOsFactorIndex_)
+        {
+            cachedOsFactorIndex_ = requestedOsIndex;
+            setLatencySamples (busProcessor_.getLatencySamples (cachedOsFactorIndex_));
+        }
+    }
 
     SF2Loader* loader = activeLoader_.load (std::memory_order_acquire);
     if (!voicePool_ || loader == nullptr)
@@ -200,36 +210,134 @@ juce::AudioProcessorEditor* RomplerProcessor::createEditor()
 
 void RomplerProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    if (auto xml = apvts_.copyState().createXml())
-        copyXmlToBinary (*xml, destData);
+    auto xml = std::make_unique<juce::XmlElement> ("EONDS50State");
+
+    // Save APVTS parameters.
+    if (auto paramXml = apvts_.copyState().createXml())
+        xml->addChildElement (paramXml.release());
+
+    // Save bank slot state.
+    auto* banksXml = xml->createNewChildElement ("Banks");
+    banksXml->setAttribute ("activeSlot", activeBankSlot_.load (std::memory_order_relaxed));
+    for (int i = 0; i < maxBanks; ++i)
+    {
+        auto* slotXml = banksXml->createNewChildElement ("Slot");
+        slotXml->setAttribute ("index", i);
+        slotXml->setAttribute ("file", bankNames_[static_cast<std::size_t> (i)]);
+    }
+
+    copyXmlToBinary (*xml, destData);
 }
 
 void RomplerProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
-    if (auto xml = getXmlFromBinary (data, sizeInBytes))
-        if (xml->hasTagName (apvts_.state.getType()))
-            apvts_.replaceState (juce::ValueTree::fromXml (*xml));
+    auto xml = getXmlFromBinary (data, sizeInBytes);
+    if (! xml)
+        return;
+
+    // Restore APVTS parameters.
+    if (auto* paramXml = xml->getChildByName (apvts_.state.getType()))
+        apvts_.replaceState (juce::ValueTree::fromXml (*paramXml));
+
+    // Restore bank slots.
+    if (auto* banksXml = xml->getChildByName ("Banks"))
+    {
+        const int activeSlot = banksXml->getIntAttribute ("activeSlot", 0);
+        for (auto* slotXml : banksXml->getChildIterator ("Slot"))
+        {
+            const int idx = slotXml->getIntAttribute ("index", -1);
+            const auto fileName = slotXml->getStringAttribute ("file", {});
+            if (idx >= 0 && idx < maxBanks && fileName.isNotEmpty())
+            {
+                const juce::File file (fileName);
+                if (file.existsAsFile())
+                    loadSoundFont (file, idx);
+            }
+        }
+        switchBank (juce::jlimit (0, maxBanks - 1, activeSlot));
+    }
 }
 
 void RomplerProcessor::loadSoundFont(const juce::File& file)
 {
+    loadSoundFont (file, activeBankSlot_.load (std::memory_order_relaxed));
+}
+
+void RomplerProcessor::loadSoundFont(const juce::File& file, int bankSlot)
+{
+    if (bankSlot < 0 || bankSlot >= maxBanks)
+        return;
+
     auto newLoader = std::make_unique<SF2Loader>(static_cast<int>(sampleRate_));
     if (!newLoader->loadFile(file))
         return;
 
-    const auto [bank, program] = newLoader->firstPresetProgram();
-    currentBank_.store (bank, std::memory_order_relaxed);
-    currentProgram_.store (program, std::memory_order_relaxed);
-    loadedFileName_ = file.getFileName();
+    bankNames_[static_cast<std::size_t> (bankSlot)] = file.getFileName();
 
-    // Publish the new loader before retiring the old one: a note-on on the
-    // audio thread that reads activeLoader_ right now must see either the
-    // fully-built new loader or the still-valid old one, never a half state.
-    activeLoader_.store (newLoader.get(), std::memory_order_release);
+    // If this is the active slot, update currentBank/currentProgram and publish.
+    if (bankSlot == activeBankSlot_.load (std::memory_order_relaxed))
+    {
+        const auto [bank, program] = newLoader->firstPresetProgram();
+        currentBank_.store (bank, std::memory_order_relaxed);
+        currentProgram_.store (program, std::memory_order_relaxed);
+        activeLoader_.store (newLoader.get(), std::memory_order_release);
+    }
 
-    if (sf2Loader_)
-        retiredLoaders_.push_back (std::move (sf2Loader_));
-    sf2Loader_ = std::move (newLoader);
+    // Retire the old loader for this slot.
+    auto& slot = sf2Loaders_[static_cast<std::size_t> (bankSlot)];
+    if (slot)
+        retiredLoaders_.push_back (std::move (slot));
+    slot = std::move (newLoader);
+}
+
+void RomplerProcessor::removeBank(int bankSlot)
+{
+    if (bankSlot < 0 || bankSlot >= maxBanks)
+        return;
+
+    auto& slot = sf2Loaders_[static_cast<std::size_t> (bankSlot)];
+    if (slot)
+    {
+        // If removing the active slot, clear activeLoader_ first.
+        if (bankSlot == activeBankSlot_.load (std::memory_order_relaxed))
+        {
+            activeLoader_.store (nullptr, std::memory_order_release);
+            currentBank_.store (0, std::memory_order_relaxed);
+            currentProgram_.store (0, std::memory_order_relaxed);
+        }
+        retiredLoaders_.push_back (std::move (slot));
+    }
+    bankNames_[static_cast<std::size_t> (bankSlot)] = {};
+}
+
+void RomplerProcessor::switchBank(int bankSlot)
+{
+    if (bankSlot < 0 || bankSlot >= maxBanks)
+        return;
+
+    activeBankSlot_.store (bankSlot, std::memory_order_relaxed);
+
+    auto* loader = sf2Loaders_[static_cast<std::size_t> (bankSlot)].get();
+    activeLoader_.store (loader, std::memory_order_release);
+
+    if (loader)
+    {
+        const auto [bank, program] = loader->firstPresetProgram();
+        currentBank_.store (bank, std::memory_order_relaxed);
+        currentProgram_.store (program, std::memory_order_relaxed);
+    }
+    else
+    {
+        currentBank_.store (0, std::memory_order_relaxed);
+        currentProgram_.store (0, std::memory_order_relaxed);
+    }
+}
+
+bool RomplerProcessor::isBankLoaded(int bankSlot) const noexcept
+{
+    if (bankSlot < 0 || bankSlot >= maxBanks)
+        return false;
+    return sf2Loaders_[static_cast<std::size_t> (bankSlot)] != nullptr;
 }
 
 // ---------------------------------------------------------------------------
@@ -279,27 +387,30 @@ void RomplerProcessor::loadBundledSoundFont()
     const juce::File file = pathForBundledSoundFont();
     if (file.existsAsFile())
     {
-        loadSoundFont (file);
-        // Only latch once the font is actually loaded. A failed or absent
-        // bundle must be retried on the next prepareToPlay() (e.g. the host
-        // restarts audio, or the bundle appears after a late install).
-        bundledFontLoaded_ = (sf2Loader_ != nullptr);
+        loadSoundFont (file, 0);
+        bundledFontLoaded_ = isBankLoaded (0);
     }
 }
 
 int RomplerProcessor::getPresetCount() const noexcept
 {
-    return sf2Loader_ ? sf2Loader_->presetCount() : 0;
+    const int slot = activeBankSlot_.load (std::memory_order_relaxed);
+    auto* loader = sf2Loaders_[static_cast<std::size_t> (slot)].get();
+    return loader ? loader->presetCount() : 0;
 }
 
 juce::String RomplerProcessor::getPresetName (int presetIndex) const noexcept
 {
-    return sf2Loader_ ? sf2Loader_->presetName (presetIndex) : juce::String {};
+    const int slot = activeBankSlot_.load (std::memory_order_relaxed);
+    auto* loader = sf2Loaders_[static_cast<std::size_t> (slot)].get();
+    return loader ? loader->presetName (presetIndex) : juce::String {};
 }
 
 std::pair<int, int> RomplerProcessor::getPresetBankProgram (int presetIndex) const noexcept
 {
-    return sf2Loader_ ? sf2Loader_->presetBankProgram (presetIndex) : std::pair<int, int> { 0, 0 };
+    const int slot = activeBankSlot_.load (std::memory_order_relaxed);
+    auto* loader = sf2Loaders_[static_cast<std::size_t> (slot)].get();
+    return loader ? loader->presetBankProgram (presetIndex) : std::pair<int, int> { 0, 0 };
 }
 
 void RomplerProcessor::selectPreset (int bank, int program) noexcept

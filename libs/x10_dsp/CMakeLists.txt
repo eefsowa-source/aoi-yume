@@ -40,5 +40,6 @@ set(X10_DSP_HEADERS
     include/x10/dsp/nonlinear/Naive.h
     include/x10/dsp/filter/DCBlocker.h
     include/x10/dsp/filter/TptSvf.h
+    include/x10/dsp/envelope/Adsr.h
 )
 target_sources(x10_dsp INTERFACE ${X10_DSP_HEADERS})

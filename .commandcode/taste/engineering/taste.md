@@ -1,6 +1,7 @@
 # Engineering preferences
 
 - Treats compiler warnings as errors (Gate 1: "경고 = 에러") — warnings block progression. Confidence: 0.8
+- Prefers enum switches to enumerate every case explicitly (e.g., `case Idle: case Sustain: ...`) rather than relying on `default:`, to satisfy strict warnings like `-Wswitch-enum`. Confidence: 0.7
 - Prefers objective numeric measurements (JSON metrics from offline renders/FFT, pixel-coordinate analysis of screenshots) over image/visual-based analysis (e.g., VLM/vision reading) for verification — applied to both audio and UI layout checks; vision findings are treated as hypotheses to confirm with measured data (e.g., corrected a vision false positive about knob alignment via pixel analysis). Confidence: 0.8
 - Wants blocking milestone gates: work advances to the next stage only after all acceptance criteria pass. Confidence: 0.7
 - Wants the verification loop itself validated by deliberately injecting known regressions (e.g., naive hard-clipping) to confirm the detectors actually catch failures. Confidence: 0.6

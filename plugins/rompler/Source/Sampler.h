@@ -4,6 +4,7 @@
 #include <x10/instrument/RegionIndex.h>
 #include <x10/dsp/nonlinear/Curves.h>
 #include <x10/dsp/filter/TptSvf.h>
+#include <x10/dsp/envelope/Adsr.h>
 #include <array>
 #include <cstdint>
 #include <memory>
@@ -32,22 +33,20 @@ struct Sample
 class Voice
 {
 public:
-    /** Short fade-out time used by the attack stage when a key is released during it. */
-    static constexpr float releaseTime = 0.08f;
-
     void start(const Sample* sample, int midiNote, float velocity) noexcept;
-    /** Starts a short release fade; the voice deactivates itself once it reaches zero. */
+    /** Begins the release phase; the voice deactivates once the ADSR fades to zero. */
     void stop() noexcept;
     [[nodiscard]] bool isActive() const noexcept { return active_; }
-    /** True while fading out from a note-off, before the slot is retired. */
-    [[nodiscard]] bool isReleasing() const noexcept { return active_ && releasing_; }
+    /** True while in the Release stage, before the slot is retired. */
+    [[nodiscard]] bool isReleasing() const noexcept;
     /** The note this voice is currently sounding (or -1 once it has no note). */
     [[nodiscard]] int note() const noexcept { return midiNote_; }
     /** How far the envelope has run; used to pick the oldest voice when stealing. */
     [[nodiscard]] float envPhase() const noexcept { return envPhase_; }
 
     void render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
-                int curveId, int filterRouting, float filterOffsetCents) noexcept;
+                int curveId, int filterRouting, float filterOffsetCents,
+                float attackMs, float decayMs, float sustainLevel, float releaseMs) noexcept;
 
 private:
     const Sample* sample_ = nullptr;
@@ -56,11 +55,13 @@ private:
     bool active_ = false;
     int midiNote_ = -1;
     float envPhase_ = 0.0f;
-    bool releasing_ = false;
-    float releaseLevel_ = 0.0f;
-    float releasePhase_ = 0.0f;
 
-    // Loop state: while looping (not releasing), phase_ wraps back to
+    x10::dsp::Adsr adsr_;
+    // Bit-pattern hash of the last pushed envelope parameter block; see render()
+    // for why we must not re-push identical values every block.
+    std::uint32_t envParamHash_ = 0;
+
+    // Loop state: while looping (not in Release), phase_ wraps back to
     // loopStart_ once it passes loopEnd_. Cleared by start() so a retriggered
     // voice always begins from the sample head.
     int loopStart_ = 0;
@@ -75,8 +76,6 @@ private:
     x10::dsp::TptSvf filter_;
     bool filterNeedsPrepare_ = true;
     int filterSampleRate_ = 0;
-
-    [[nodiscard]] float envelope() const noexcept;
 };
 
 class VoicePool
@@ -94,7 +93,8 @@ public:
     void stopAll() noexcept;
 
     void render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
-                int curveId, int filterRouting, float filterOffsetCents) noexcept;
+                int curveId, int filterRouting, float filterOffsetCents,
+                float attackMs, float decayMs, float sustainLevel, float releaseMs) noexcept;
 
 private:
     std::vector<Voice> voices_;

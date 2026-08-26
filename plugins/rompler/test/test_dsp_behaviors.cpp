@@ -46,7 +46,7 @@ TEST_CASE ("polyphone cap stops allocating voices past the limit", "[dsp][voice]
     pool.start (&sample, 62, 0.5f);
 
     std::vector<float> block (static_cast<std::size_t> (kBlockSize));
-    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
 
     // One voice playing a 1s tone within a 512-frame block => non-zero but a
     // single voice's amplitude, not two stacked. We simply assert it fired.
@@ -55,7 +55,7 @@ TEST_CASE ("polyphone cap stops allocating voices past the limit", "[dsp][voice]
     // Raising polyphony lets the dropped note register on the next render.
     pool.setPolyphony (4);
     std::vector<float> block2 (static_cast<std::size_t> (kBlockSize));
-    pool.render (block2.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+    pool.render (block2.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
     REQUIRE (blockPeak (block2.data(), kBlockSize) > 0.0f);
 }
 
@@ -68,12 +68,12 @@ TEST_CASE ("velocity-to-drive scales loudness monotonically", "[dsp][voice]")
     // hit quieter; neutral 0 leaves it untouched.
     pool.start (&sample, 60, 1.0f);
     std::vector<float> loud (static_cast<std::size_t> (kBlockSize));
-    pool.render (loud.data(), kBlockSize, kSampleRate, 10.0f, 20.0f, 0, 0, 0.0f);
+    pool.render (loud.data(), kBlockSize, kSampleRate, 10.0f, 20.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
 
     pool.stopAll();
     pool.start (&sample, 60, 0.1f);
     std::vector<float> soft (static_cast<std::size_t> (kBlockSize));
-    pool.render (soft.data(), kBlockSize, kSampleRate, 10.0f, 20.0f, 0, 0, 0.0f);
+    pool.render (soft.data(), kBlockSize, kSampleRate, 10.0f, 20.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
 
     REQUIRE (blockPeak (soft.data(), kBlockSize) < blockPeak (loud.data(), kBlockSize));
 }
@@ -87,7 +87,7 @@ TEST_CASE ("release fades to silence instead of cutting off abruptly", "[dsp][vo
 
     // Let the voice ring for a bit, then release it.
     std::vector<float> ring (static_cast<std::size_t> (kBlockSize));
-    pool.render (ring.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+    pool.render (ring.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
     REQUIRE (blockPeak (ring.data(), kBlockSize) > 0.0f);
 
     pool.stop (60);
@@ -97,7 +97,7 @@ TEST_CASE ("release fades to silence instead of cutting off abruptly", "[dsp][vo
     for (int b = 0; b < 64; ++b)
     {
         std::fill (ring.begin(), ring.end(), 0.0f);
-        pool.render (ring.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+        pool.render (ring.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
         const float p = blockPeak (ring.data(), kBlockSize);
         REQUIRE (p <= lastPeak + 1.0e-5f); // monotonic decay
         lastPeak = p;
@@ -121,7 +121,7 @@ TEST_CASE ("a released voice is reusable for a new note", "[dsp][voice]")
     // regardless of the release tail by resetting the same voice.
     pool.start (&sample, 60, 0.5f);
     std::vector<float> block (static_cast<std::size_t> (kBlockSize));
-    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
     REQUIRE (blockPeak (block.data(), kBlockSize) > 0.0f);
 }
 
@@ -137,7 +137,7 @@ TEST_CASE ("retriggering a held note reuses its voice instead of stacking", "[ds
     pool.start (&sample, 60, 0.9f); // retrigger while still held
 
     std::vector<float> block (static_cast<std::size_t> (kBlockSize));
-    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
 
     // With polyphony 1, a stacked voice would have been dropped and produced
     // silence; retriggering in place must still sound.
@@ -155,7 +155,7 @@ TEST_CASE ("note-off cannot release a voice recycled for another note", "[dsp][v
     for (int b = 0; b < 64; ++b)
     {
         std::vector<float> block (static_cast<std::size_t> (kBlockSize));
-        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
     }
 
     // The slot is recycled for note 62. A late note-off for 60 must not
@@ -164,7 +164,7 @@ TEST_CASE ("note-off cannot release a voice recycled for another note", "[dsp][v
     pool.stop (60); // stale note-off for a note that is no longer sounding
 
     std::vector<float> block (static_cast<std::size_t> (kBlockSize));
-    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
     REQUIRE (blockPeak (block.data(), kBlockSize) > 0.0f);
 }
 
@@ -181,13 +181,13 @@ TEST_CASE ("a saturated pool steals the longest-held voice for a new note", "[ds
     for (int b = 0; b < 8; ++b) // let note 60's envelope age
     {
         std::fill (block.begin(), block.end(), 0.0f);
-        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
     }
 
     // A third note must steal the oldest slot (60) rather than drop silently.
     pool.start (&sample, 64, 0.5f);
     std::fill (block.begin(), block.end(), 0.0f);
-    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
     REQUIRE (blockPeak (block.data(), kBlockSize) > 0.0f);
 }
 
@@ -209,7 +209,7 @@ TEST_CASE ("a looping sample keeps sounding past its end", "[dsp][voice][loop]")
     for (int b = 0; b < 3 * kSampleRate / kBlockSize; ++b)
     {
         std::vector<float> block (static_cast<std::size_t> (kBlockSize));
-        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
         lastPeak = blockPeak (block.data(), kBlockSize);
         REQUIRE (lastPeak > 0.0f); // never dies out while held
     }
@@ -229,7 +229,7 @@ TEST_CASE ("a non-looping sample goes silent once it ends", "[dsp][voice][loop]"
     for (int b = 0; b < 2 * kSampleRate / kBlockSize; ++b)
     {
         std::vector<float> block (static_cast<std::size_t> (kBlockSize));
-        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
         if (blockPeak (block.data(), kBlockSize) <= 1.0e-6f)
         {
             wentSilent = true;
@@ -253,7 +253,7 @@ TEST_CASE ("release on a looping sample fades out instead of restarting the loop
     for (int b = 0; b < 2 * kSampleRate / kBlockSize; ++b)
     {
         std::vector<float> block (static_cast<std::size_t> (kBlockSize));
-        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
     }
     pool.stop (60);
 
@@ -264,7 +264,7 @@ TEST_CASE ("release on a looping sample fades out instead of restarting the loop
     for (int b = 0; b < 32; ++b)
     {
         std::vector<float> block (static_cast<std::size_t> (kBlockSize));
-        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
         const float p = blockPeak (block.data(), kBlockSize);
         REQUIRE (p <= lastPeak + 1.0e-5f); // monotonic decay, no click back up
         lastPeak = p;
@@ -298,7 +298,7 @@ TEST_CASE ("release holds the last sample instead of truncating mid-cycle", "[ds
     for (int b = 0; b < 1; ++b)
     {
         std::fill (block.begin(), block.end(), 0.0f);
-        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
     }
     pool.stop (60);
 
@@ -309,7 +309,7 @@ TEST_CASE ("release holds the last sample instead of truncating mid-cycle", "[ds
     for (int b = 0; b < 32; ++b)
     {
         std::fill (block.begin(), block.end(), 0.0f);
-        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
         const float p = blockPeak (block.data(), kBlockSize);
         REQUIRE (p <= lastPeak + 1.0e-5f); // monotonic decay, no click back up
         lastPeak = p;
@@ -332,7 +332,7 @@ TEST_CASE ("release mid-attack keeps the fade slope continuous", "[dsp][voice]")
     // Render a few samples into the attack (attack is 10 ms at 48 kHz, so
     // ~480 samples), then release while the envelope is still rising.
     std::vector<float> block (static_cast<std::size_t> (kBlockSize));
-    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
     pool.stop (60);
 
     // Render one more block and look at the *first differences* across the
@@ -341,7 +341,7 @@ TEST_CASE ("release mid-attack keeps the fade slope continuous", "[dsp][voice]")
     // level) would introduce a slope spike several times that. The scaled
     // ramp keeps the fade slope the same whatever the release level.
     std::fill (block.begin(), block.end(), 0.0f);
-    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f);
+    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
 
     float maxSlope = 0.0f;
     for (int i = 1; i < kBlockSize; ++i)

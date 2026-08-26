@@ -101,7 +101,7 @@ TEST_CASE ("pitch tracks the played MIDI note", "[sf2][pitch]")
         pool.start (s, note, 100.0f / 127.0f);
         juce::AudioBuffer<float> buf (1, blockSize);
         pool.render (buf.getWritePointer (0), blockSize, static_cast<int> (kSampleRate),
-                     0.0f, 0.0f, 0, 0, 0.0f);
+                     0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
 
         int crossings = 0;
         for (int i = 1; i < blockSize; ++i)
