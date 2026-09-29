@@ -327,7 +327,46 @@ synth, 48 kHz, reverb/chorus off, 4096 frames, Voice_Erhu.sf2 preset 0/0, note 6
 - vibLFO/modLFO 존 파라미터: `Region` 스키마에 LFO 필드가 없다. 스키마와 flattener를
   함께 확장해야 한다(계획서의 "flattener 변경 없이 가능"은 이 항목에는 해당하지 않는다).
 
-빌드 상태 메모: 이 커밋 직후 작업 트리에는 동시 편집 중인 `PluginEditor.cpp`/`.h`
-(접근성 작업, `publishAccessibleNode` 호출 시그니처 불일치)가 있어 플러그인 번들
-빌드와 pluginval 게이트는 그 편집이 컴파일된 뒤에 확인해야 한다. 커밋된 트리에는
-포함되지 않는다.
+### UX-4 1단계 - 접근성과 키보드 조작 (2026-09-30, 커밋 `7f706cd`)
+
+계획서 5번 항목이 지적한 그대로, 패널은 스스로 그린다고 각 파라미터를 실제로 나르는
+slider/combo는 자식 컴포넌트가 아니었다. 스크린리더는 이름도 역할도 값도 조작 수단도
+없는 일반 컴포넌트만 만났고, 키보드는 어떤 컨트롤에도 닿지 못했다.
+
+각 래퍼가 자기 slider/combo를 투명·마우스 통과 자식으로 다시 붙이면서 네이티브 노드가
+한꺼번에 복구된다(role, name, description, 범위값, 값 문자열). 그림과 마우스 동작은
+바뀌지 않았다. 접근성 이름은 패널 레전드를 따라가므로 스크린리더는 호스트 측 긴 이름
+`Envelope Sustain` 대신 `SUSTAIN`을 읽는다.
+
+키보드는 같은 래퍼 위에서 동작한다. 화살표는 범위의 2%(Shift면 그 1/10), Home/End는
+양 끝, 스위치는 선택지 순환, Stepper는 authored interval 한 칸. 포커스 링은
+paintOverChildren에서 그려서 drawn과 스킨 레이아웃 위를 모두 덮고, 어느 paint 경로도
+포커스를 몰라야 한다. Tab 순서는 이미 신호 경로(VOICE->BUS->COMP->ENV->FX) 순인
+컨트롤 배열을 그대로 따른다.
+
+수정자 비교는 `isKeyCode`로 한다. `KeyPress::operator==(int)`는 수정자가 하나라도
+누려 있으면 false라서 Shift 세분 제스처가 키보드로 도달 불가였다.
+
+검증:
+
+- `parameter controls expose a named, valued accessibility node` - SUSTAIN 노드가
+  값 문자열 `%`와 0..100 범위를 갖는지 확인한다.
+- `a focused knob steps its parameter with the arrow keys` - 50 -> 48 -> 47.8 -> 100.
+- `a focused switch cycles its choice with the arrow keys` - 선택지 인덱스 왕복.
+- 접근성 핸들러는 네이티브 피어 아래 컴포넌트에만 생기므로 테스트는
+  `TemporaryDesktopPeer`로 창을 띄우지 않고 피어만 공급한다.
+- `ctest --preset dev` 88/88, `ctest --preset plugin` 194/194,
+  `pluginval_vst3_strictness10` 통과(28.7초).
+- `ui_shot` 오프스크린 렌더 1563x1006 - 패널이 정상 그려진다. 포커스 링은
+  키보드 포커스가 있을 때만 나타나므로 이 캡처에는 없다.
+
+빌드 산출물 SHA256(RelWithDebInfo, `7f706cd`):
+
+```
+0f072b7944bffd082c1ae4eb0cd7df4992e90cfdf61d41bcaf1be5149aad1f7a  VST3/Aoi YUME.vst3/Contents/MacOS/Aoi YUME
+877f4ee1c46f8bce41fae2e727b416960cfb1ff37e4624a752e3536b75b65855  AU/Aoi YUME.component/Contents/MacOS/Aoi YUME
+f4fabb638ab15bc8df3f592226a96c72bb37cb8bc2d66adb21d6fd67d70deee7  Standalone/Aoi YUME.app/Contents/MacOS/Aoi YUME
+```
+
+미검증: auval은 설치된 AU가 2026-09-19 바이너리(`9af0d85c`)라 현재 빌드와 해시가
+달라 게이트 증거로 쓸 수 없다. 호스트 로딩과 청취는 사용자만 확인 가능하다.
