@@ -280,3 +280,54 @@ gate의 동작점과 같다). 게이트 비교는 양쪽이 **같은 커브 입�
    레퍼런스만 더 세게 구동되어 −6.5 dB 차이가 났다. 그래서 dry 렌더를 레퍼런스 입력으로 쓴다.)
 - 20 kHz 소신호 손실 10-13 dB 구간을 고정한다(실측 11.73).
 - 숨김 `[.][benchmark][adaa]`가 두 경로의 sample당 비용과 비율을 출력한다.
+
+### SQ-2 1단계 - velocity에서 amp까지 SF2 dB 곡선 (2026-09-30)
+
+먼저 레퍼런스 곡선을 실측했다. FluidSynth 2.x로 로컬 코퍼스를 렌더했고(velocity마다 새
+synth, 48 kHz, reverb/chorus off, 4096 frames, Voice_Erhu.sf2 preset 0/0, note 60),
+127 기준 상대 레벨은 다음과 같다.
+
+| vel | 실측 | 12*log2(v/127) | round(400*log10(127/v))/10 |
+| ---: | ---: | ---: | ---: |
+| 1 | -84.200 | -83.864 | -84.2 |
+| 8 | -48.000 | -47.864 | -48.0 |
+| 16 | -36.000 | -35.864 | -36.0 |
+| 32 | -23.900 | -23.864 | -23.9 |
+| 64 | -11.900 | -11.864 | -11.9 |
+| 96 | -4.900 | -4.845 | -4.9 |
+| 127 | 0.000 | 0.000 | 0.0 |
+
+즉 attenuation = round(400*log10(127/vel)) centibel, 0.1 dB 양자화이고 진폭으로는
+**gain = velocity^2**이다. "12 dB per octave" 근사도 같은 값이지만 0.1 dB 양자화까지
+넣어야 레퍼런스와 정확히 같아진다(양자화를 빼면 최대 0.34 dB 어긋난다).
+
+변경은 보이스의 `interpolated * velocity_ * env * attenuationGain_`에서 선형 `velocity_`
+곱을 `velocityGain_`(SF2 곡선)으로 바꾼 것이다. `velocity_`는 velocity->drive 변조에
+그대로 남았다. 이 변경은 velocity 응답 자체를 바꾼다. velocity 64는 -5.9 dB에서
+-11.9 dB로, velocity 1은 -42 dB에서 -84.2 dB로 내려간다. velocity 127은 변화가 없다.
+뱅크가 이 곡선에 맞춰 보정되어 있으므로(SQ-2의 전제) 기본값으로 켰다.
+
+검증:
+
+- `voice velocity follows the SoundFont curve`(test_dsp_behaviors)가 레퍼런스 표 7개
+  값과 0.15 dB 이내인지 확인한다.
+- `velocity levels through a real bank match the reference render`(test_sf2_playback)가
+  Voice_Erhu.sf2 0/0 note 60을 실제 보이스풀로 4096 프레임 렌더해 같은 표와 0.5 dB
+  이내인지 확인한다. 2026-09-08 stage1 이후 처음으로 엔진 렌더를 레퍼런스 렌더와
+  직접 비교하는 테스트다.
+- rompler_tests 102 케이스 통과.
+
+남은 SQ-2:
+
+- modEnv->pitch / modEnv->filter: `Region`에 `modulationEnvelope`,
+  `modEnvToPitchCents`, `modEnvToFilterCents`가 이미 있으나 `SF2Loader`가 아직
+  `Sample`로 복사하지 않는다. 보이스에 두 번째 엔벨로프(존 volumeEnvelope 재사용)와
+  피치/필터 변조 경로가 필요하다. 필터 계수는 블록마다가 아니라 서브블록(예: 16 샘플)
+  주기로 갱신하는 편이 비용 대비 충분하다.
+- vibLFO/modLFO 존 파라미터: `Region` 스키마에 LFO 필드가 없다. 스키마와 flattener를
+  함께 확장해야 한다(계획서의 "flattener 변경 없이 가능"은 이 항목에는 해당하지 않는다).
+
+빌드 상태 메모: 이 커밋 직후 작업 트리에는 동시 편집 중인 `PluginEditor.cpp`/`.h`
+(접근성 작업, `publishAccessibleNode` 호출 시그니처 불일치)가 있어 플러그인 번들
+빌드와 pluginval 게이트는 그 편집이 컴파일된 뒤에 확인해야 한다. 커밋된 트리에는
+포함되지 않는다.

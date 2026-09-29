@@ -155,6 +155,46 @@ TEST_CASE ("SoundFont attenuation applies before the voice chain", "[dsp][voice]
     REQUIRE (peakFor (half) / unityPeak == Catch::Approx (0.5f).margin (0.01f));
 }
 
+TEST_CASE ("voice velocity follows the SoundFont curve", "[dsp][voice][sf2]")
+{
+    // The amplitude is a quadratic curve in velocity: 0 dB at 127, then 12 dB per
+    // halving, quantised to the 0.1 dB the format stores. FluidSynth rendering the
+    // local corpus reproduces these exact decibels.
+    const std::pair<int, float> reference[] = {
+        { 127, 0.0f }, { 96, -4.9f }, { 64, -11.9f }, { 32, -23.9f },
+        { 16, -36.0f }, { 8, -48.0f }, { 1, -84.2f }
+    };
+
+    aod::Sample sample;
+    sample.data.assign (512, 1.0f);
+    sample.sampleRate = kSampleRate;
+    sample.volumeEnvelope = { 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.1f };
+
+    std::array<float, 256> output {};
+    const auto levelAt = [&] (int velocity)
+    {
+        aod::VoicePool pool (1);
+        pool.start (&sample, 60, static_cast<float> (velocity) / 127.0f);
+        std::fill (output.begin(), output.end(), 0.0f);
+        pool.render (output.data(), static_cast<int> (output.size()), kSampleRate,
+                     0.0f, 0.0f, 0, 0, 0.0f,
+                     0.0f, 0.0f, 1.0f, 1000.0f,
+                     0.0f, 0.0f);
+        return blockPeak (output.data(), static_cast<int> (output.size()));
+    };
+
+    const float fullScale = levelAt (127);
+    REQUIRE (fullScale > 0.0f);
+
+    for (const auto& [velocity, expectedDb] : reference)
+    {
+        const float relativeDb = 20.0f * std::log10 (levelAt (velocity) / fullScale);
+        CAPTURE (velocity, expectedDb, relativeDb);
+        REQUIRE (relativeDb == Catch::Approx (expectedDb).margin (0.15f));
+    }
+}
+
+
 TEST_CASE ("normalized sustain remains audible after decay", "[dsp][voice][level]")
 {
     aod::VoicePool pool (1);

@@ -201,6 +201,8 @@ private:
     const SF2Loader* sampleOwner_ = nullptr;
     double phase_ = 0.0;
     float velocity_ = 0.0f;
+    /** SoundFont velocity curve, applied instead of a linear multiply. */
+    float velocityGain_ = 1.0f;
     bool active_ = false;
     juce::SmoothedValue<float> driveDbSmooth_;
     bool driveNeedsReset_ = true;

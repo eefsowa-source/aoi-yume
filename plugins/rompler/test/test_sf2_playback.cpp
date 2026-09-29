@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 
 #include "PluginProcessor.h"
 #include "SF2Loader.h"
@@ -227,6 +228,59 @@ TEST_CASE ("the processor publishes its sounding notes for the keybed", "[sf2][m
 
     REQUIRE_FALSE (isActive (soundingKey));
 }
+
+TEST_CASE ("velocity levels through a real bank match the reference render", "[sf2][m1][velocity]")
+{
+    // Reference: FluidSynth 2.x rendering Voice_Erhu.sf2 preset 0/0, note 60, 4096
+    // frames at 48 kHz with reverb and chorus off and a fresh synth per velocity.
+    // Its attenuation follows the format's velocity curve to the 0.1 dB quantum,
+    // so the engine must reproduce the same relative levels.
+    const juce::File bank = juce::File (X10_SF2_CROSSCHECK_TESTDATA).getChildFile ("Voice_Erhu.sf2");
+    if (! bank.existsAsFile())
+        SKIP ("the velocity reference bank is not present on this machine");
+
+    aod::SF2Loader loader (static_cast<int> (kSampleRate));
+    REQUIRE (loader.loadFile (bank));
+
+    constexpr int bankMsb = 0;
+    constexpr int program = 0;
+    constexpr int note = 60;
+    constexpr int frames = 4096;
+
+    const std::pair<int, double> reference[] = {
+        { 96, -4.9 }, { 64, -11.9 }, { 32, -23.9 }, { 16, -36.0 }, { 8, -48.0 }, { 1, -84.2 }
+    };
+
+    const auto levelAt = [&] (int velocity)
+    {
+        std::array<const aod::Sample*, aod::SF2Loader::maxMatchingSamples> layers {};
+        const auto resolved = loader.getSamples (bankMsb, program, note, velocity, layers);
+        REQUIRE (resolved != 0);
+
+        aod::VoicePool pool (1);
+        pool.start (std::span<const aod::Sample* const> { layers.data(), std::min (resolved, layers.size()) },
+                    note, static_cast<float> (velocity) / 127.0f);
+
+        std::vector<float> rendered (static_cast<std::size_t> (frames), 0.0f);
+        pool.render (rendered.data(), frames, static_cast<int> (kSampleRate),
+                     0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 0.0f, 1.0f, 1000.0f, 0.0f, 0.0f);
+
+        double sumSquares = 0.0;
+        for (const float value : rendered)
+            sumSquares += static_cast<double> (value) * static_cast<double> (value);
+        return std::sqrt (sumSquares / frames);
+    };
+
+    const double fullScaleDb = 20.0 * std::log10 (levelAt (127));
+
+    for (const auto& [velocity, expectedDb] : reference)
+    {
+        const double relativeDb = 20.0 * std::log10 (levelAt (velocity)) - fullScaleDb;
+        CAPTURE (velocity, expectedDb, relativeDb);
+        REQUIRE (relativeDb == Catch::Approx (expectedDb).margin (0.5));
+    }
+}
+
 
 TEST_CASE ("the processor emits a spread stereo chord", "[sf2][m1][stereo]")
 {

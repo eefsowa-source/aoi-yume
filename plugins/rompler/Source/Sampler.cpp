@@ -31,6 +31,26 @@ namespace
     // the legacy dual-mono signal exactly and every lane carries the same total
     // power (left^2 + right^2) regardless of where it sits in the image.
     constexpr float kEqualPowerUnityScale = juce::MathConstants<float>::sqrt2;
+
+    /**
+        SoundFont velocity to amplitude.
+
+        The reference implementation measures 40*log10(velocity) dB at full
+        velocity 127 - 11.9 dB at 64, 24.0 dB at 32, 84.2 dB at 1 - quantised to
+        the 0.1 dB of the format's centibels. In amplitude terms that is a
+        quadratic curve, which is what the banks are balanced against; a linear
+        velocity multiply made every soft note too loud by up to 20 dB.
+
+        Measured from FluidSynth 2.x rendering the local corpus (fresh synth per
+        velocity, 48 kHz, reverb and chorus off): the max deviation from this
+        curve over all 127 velocities was the 0.05 dB quantisation itself.
+    */
+    [[nodiscard]] float velocityGainFor (float velocity) noexcept
+    {
+        const float clamped = std::clamp (velocity, 1.0f / 127.0f, 1.0f);
+        const float attenuationCb = std::round (400.0f * std::log10 (clamped));
+        return std::pow (10.0f, attenuationCb * 0.1f / 20.0f);
+    }
 }
 
 float Voice::Drive::curveValue (float driven, int curveId) noexcept
@@ -276,6 +296,7 @@ void Voice::start(const Sample* sample, int midiNote, float velocity,
 {
     bindSample (sample, sampleOwner);
     velocity_ = velocity;
+    velocityGain_ = velocityGainFor (velocity);
     midiNote_ = midiNote;
     phase_ = 0.0;
     envPhase_ = 0.0f;
@@ -619,7 +640,7 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
                 return sampleData[static_cast<std::size_t>(tapIndex)];
             });
 
-        float sample = interpolated * velocity_ * env * attenuationGain_;
+        float sample = interpolated * velocityGain_ * env * attenuationGain_;
 
         if (filterRouting == 0) // Pre: filter before drive
             sample = filter_.process (sample);
