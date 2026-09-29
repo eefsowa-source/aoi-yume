@@ -10,6 +10,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <vector>
 
 namespace aod
@@ -43,6 +44,13 @@ struct Sample
     int loopStart = 0;
     int loopEnd = 0;
     bool loopEnabled = false;
+    // SoundFont amplitude generators are resolved at load time.  Keeping the
+    // region data next to the decoded PCM lets the audio thread apply it using
+    // only the Sample pointer it already owns.
+    x10::instrument::Envelope volumeEnvelope {};
+    float attenuationDb = 0.0f;
+    float pan = 0.0f;
+    std::uint8_t exclusiveClass = 0;
     float filterCutoffHz = 19912.13f;
     float filterResonanceDb = 0.0f;
     // Pitch mapping: the sample plays back untransposed when the played MIDI
@@ -68,6 +76,11 @@ public:
     */
     void retarget(const Sample* sample, int midiNote,
                   const SF2Loader* sampleOwner = nullptr) noexcept;
+    /**
+        SoundFont exclusiveClass choke: fades this voice out quickly instead of
+        cutting it, so the retrigger cannot click. No-op when not active.
+    */
+    void choke() noexcept;
     /** Immediately retires the slot and clears its current note ownership. */
     void retire() noexcept;
     /** Begins the release phase; the voice deactivates once the ADSR fades to zero. */
@@ -81,6 +94,12 @@ public:
     [[nodiscard]] float envPhase() const noexcept { return envPhase_; }
     /** Current ADSR level, updated per rendered sample for deterministic stealing. */
     [[nodiscard]] float envelopeLevel() const noexcept { return envelopeLevel_; }
+    /** SoundFont pan for this zone, in the normalized [-1, 1] convention. */
+    [[nodiscard]] float samplePan() const noexcept { return sample_ != nullptr ? sample_->pan : 0.0f; }
+    [[nodiscard]] std::uint8_t exclusiveClass() const noexcept
+    {
+        return sample_ != nullptr ? sample_->exclusiveClass : 0;
+    }
     /** Monotonic sequence assigned by VoicePool on every fresh attack. */
     [[nodiscard]] std::uint64_t startSequence() const noexcept { return startSequence_; }
     void setStartSequence(std::uint64_t sequence) noexcept { startSequence_ = sequence; }
@@ -97,6 +116,43 @@ public:
                 const BandLimitedInterpolator& interpolator) noexcept;
 
 private:
+    /**
+        Per-zone amplitude shape from the SoundFont volume envelope.
+
+        This covers delay/attack/hold/decay/sustain only. The zone's release
+        time is not an independent note-off fade: it is handed to the voice's
+        ADSR as a lower bound (Voice::zoneReleaseMs_) so the SoundFont's stated
+        release is honoured while the UI release knob keeps its exponential
+        shape and can still lengthen the tail. The same value also drives the
+        Release stage, which only exclusiveClass choking enters.
+    */
+    class VolumeEnvelope
+    {
+    public:
+        enum class Stage : std::uint8_t { Idle, Delay, Attack, Hold, Decay, Sustain, Release };
+
+        void reset (const x10::instrument::Envelope& parameters) noexcept;
+        void setParameters (const x10::instrument::Envelope& parameters) noexcept;
+        void prepare (int sampleRate) noexcept;
+        /** Fades from the current level to silence; used to choke a zone. */
+        void startRelease (float seconds) noexcept;
+        [[nodiscard]] float tick() noexcept;
+        [[nodiscard]] bool isActive() const noexcept { return stage_ != Stage::Idle; }
+        [[nodiscard]] bool isReleasing() const noexcept { return stage_ == Stage::Release; }
+
+    private:
+        void enter (Stage stage) noexcept;
+        [[nodiscard]] int durationSamples (float seconds) const noexcept;
+
+        x10::instrument::Envelope parameters_ {};
+        Stage stage_ = Stage::Idle;
+        float releaseSeconds_ = 0.0f;
+        int sampleRate_ = 0;
+        int samplesRemaining_ = 0;
+        float level_ = 0.0f;
+        float increment_ = 0.0f;
+    };
+
     const Sample* sample_ = nullptr;
     const SF2Loader* sampleOwner_ = nullptr;
     double phase_ = 0.0;
@@ -111,6 +167,10 @@ private:
     int midiNote_ = -1;
     float envPhase_ = 0.0f;
     float envelopeLevel_ = 0.0f;
+    float attenuationGain_ = 1.0f;
+    // SoundFont release for the current zone, in milliseconds. Used as a floor
+    // for the ADSR release so the UI knob can extend but not shorten below it.
+    float zoneReleaseMs_ = 0.0f;
     BankToken bankToken_;
     std::uint64_t startSequence_ = 0;
 
@@ -120,6 +180,7 @@ private:
     double vibratoPhase_ = 0.0;
 
     x10::dsp::Adsr adsr_;
+    VolumeEnvelope volumeEnvelope_;
     // Bit-pattern hash of the last pushed envelope parameter block; see render()
     // for why we must not re-push identical values every block.
     std::uint32_t envParamHash_ = 0;
@@ -160,6 +221,7 @@ class VoicePool
 {
 public:
     static constexpr int maxVoices = 128;
+    static constexpr std::size_t maxLayersPerNote = 8;
 
     explicit VoicePool(int numVoices = maxVoices)
         : voices_(static_cast<std::size_t>(juce::jmax (1, numVoices)))
@@ -168,9 +230,7 @@ public:
         // first occur on the audio thread.
         , interpolator_(&BandLimitedInterpolator::shared())
         , polyphony_(static_cast<int>(voices_.size()))
-    {
-        noteToVoice_.fill (-1);
-    }
+    {}
 
     [[nodiscard]] int activeVoiceCount() const noexcept;
     [[nodiscard]] int voiceIndexForNote(int midiNote) const noexcept;
@@ -196,8 +256,13 @@ public:
 
     void start(const Sample* sample, int midiNote, float velocity,
                const SF2Loader* sampleOwner = nullptr) noexcept;
+    /** Starts every matching SF2 zone for one MIDI note without allocating. */
+    void start(std::span<const Sample* const> samples, int midiNote, float velocity,
+               const SF2Loader* sampleOwner = nullptr) noexcept;
     void stop(int midiNote) noexcept;
     void stopAll() noexcept;
+    /** Assign the current bank token to every layer of one started note. */
+    void setBankTokenForNote (int midiNote, const BankToken& token) noexcept;
 
     /**
         CC64 sustain pedal state. While held, note-offs are deferred (the
@@ -233,7 +298,8 @@ public:
         float right = 1.0f;
     };
 
-    [[nodiscard]] static StereoGains stereoGainsForVoice(std::size_t voiceIndex, float width) noexcept;
+    [[nodiscard]] static StereoGains stereoGainsForVoice(std::size_t voiceIndex, float width,
+                                                          float samplePan = 0.0f) noexcept;
 
     /**
         Render the voices into independent L/R accumulators. Each active voice
@@ -254,7 +320,6 @@ private:
     std::vector<Voice> voices_;
     std::vector<float> stereoScratch_;
     const BandLimitedInterpolator* interpolator_ = nullptr;
-    std::array<int, 128> noteToVoice_ {};
     int polyphony_ = 0;
     std::uint64_t nextStartSequence_ = 0;
 
@@ -273,6 +338,7 @@ private:
     void releaseNote(int midiNote) noexcept;
     void startVoice(Voice& voice, const Sample* sample, int midiNote, float velocity,
                     const SF2Loader* sampleOwner) noexcept;
+    void chokeExclusiveClass (std::uint8_t exclusiveClass) noexcept;
     [[nodiscard]] bool isProtectedFromStealing(std::size_t voiceIndex) const noexcept;
 
     [[nodiscard]] Voice* findFreeVoice() noexcept;

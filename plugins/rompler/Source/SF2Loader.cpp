@@ -154,6 +154,10 @@ bool SF2Loader::loadFile(const juce::File& file)
                 sample.loopStart = std::min (sample.loopStart, maxFrame - 1);
             }
             sample.loopEnabled = region.loopMode != x10::instrument::LoopMode::none;
+            sample.volumeEnvelope = region.volumeEnvelope;
+            sample.attenuationDb = region.attenuationDb;
+            sample.pan = region.pan;
+            sample.exclusiveClass = region.exclusiveClass;
             sample.filterCutoffHz = region.filterCutoffHz;
             sample.filterResonanceDb = region.filterResonanceDb;
             sample.rootKey = region.rootKey;
@@ -173,21 +177,36 @@ bool SF2Loader::loadFile(const juce::File& file)
     return true;
 }
 
-const Sample* SF2Loader::getSample(int bank, int program, int key, int velocity) const noexcept
+std::size_t SF2Loader::getSamples(int bank, int program, int key, int velocity,
+                                  std::span<const Sample*> out) const noexcept
 {
     if (!regionIndex_)
-        return nullptr;
+        return 0;
 
-    std::array<const x10::instrument::Region*, 1> matches {};
+    std::array<const x10::instrument::Region*, maxMatchingSamples> matches {};
     const std::size_t matchCount = regionIndex_->match(
         static_cast<std::uint16_t>(bank), static_cast<std::uint16_t>(program),
         key, velocity, matches);
 
-    if (matchCount == 0)
-        return nullptr;
+    // Report every resolved zone so a caller whose buffer is smaller than the
+    // result can tell that zones were dropped, matching RegionIndex::match.
+    const auto examined = std::min (matchCount, matches.size());
+    std::size_t resolved = 0;
+    for (std::size_t index = 0; index < examined; ++index)
+        if (const auto it = samples_.find (matches[index]); it != samples_.end())
+        {
+            if (resolved < out.size())
+                out[resolved] = &it->second;
+            ++resolved;
+        }
 
-    auto it = samples_.find(matches[0]);
-    return it != samples_.end() ? &it->second : nullptr;
+    return resolved;
+}
+
+const Sample* SF2Loader::getSample(int bank, int program, int key, int velocity) const noexcept
+{
+    std::array<const Sample*, 1> match {};
+    return getSamples (bank, program, key, velocity, match) != 0 ? match.front() : nullptr;
 }
 
 std::pair<int, int> SF2Loader::firstPresetProgram() const noexcept

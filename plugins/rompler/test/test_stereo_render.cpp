@@ -182,6 +182,32 @@ TEST_CASE ("a single voice lane stays centred and dual-mono at full spread", "[d
     REQUIRE (peak > 0.0f);
 }
 
+TEST_CASE ("SoundFont zone pan is applied before the global stereo bus", "[dsp][stereo][sf2]")
+{
+    auto sample = makeTone();
+    sample.pan = -1.0f;
+    sample.volumeEnvelope = { 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.1f };
+
+    aod::VoicePool pool (1);
+    pool.prepare (kBlockSize);
+    pool.start (&sample, 69, 1.0f);
+
+    std::array<float, kBlockSize> left {};
+    std::array<float, kBlockSize> right {};
+    renderStereoArgs (pool, left.data(), right.data(), kBlockSize, 0.6f);
+
+    const auto peak = [] (const auto& channel)
+    {
+        float result = 0.0f;
+        for (const float sampleValue : channel)
+            result = std::max (result, std::abs (sampleValue));
+        return result;
+    };
+
+    REQUIRE (peak (left) > 0.1f);
+    REQUIRE (peak (right) < 1.0e-6f);
+}
+
 TEST_CASE ("a near-zero width stays continuous with the dual-mono signal", "[dsp][stereo]")
 {
     const auto sample = makeTone();

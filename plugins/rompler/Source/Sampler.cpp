@@ -33,6 +33,157 @@ namespace
     constexpr float kEqualPowerUnityScale = juce::MathConstants<float>::sqrt2;
 }
 
+void Voice::VolumeEnvelope::reset (const x10::instrument::Envelope& parameters) noexcept
+{
+    parameters_ = parameters;
+    level_ = 0.0f;
+    increment_ = 0.0f;
+    samplesRemaining_ = 0;
+    stage_ = Stage::Delay;
+    if (sampleRate_ > 0)
+        enter (Stage::Delay);
+}
+
+void Voice::VolumeEnvelope::setParameters (const x10::instrument::Envelope& parameters) noexcept
+{
+    parameters_ = parameters;
+}
+
+int Voice::VolumeEnvelope::durationSamples (float seconds) const noexcept
+{
+    if (!std::isfinite (seconds) || seconds <= 0.0f || sampleRate_ <= 0)
+        return 0;
+    return std::max (0, juce::roundToInt (seconds * static_cast<float> (sampleRate_)));
+}
+
+void Voice::VolumeEnvelope::enter (Stage stage) noexcept
+{
+    stage_ = stage;
+    increment_ = 0.0f;
+
+    switch (stage_)
+    {
+        case Stage::Delay:
+            level_ = 0.0f;
+            samplesRemaining_ = durationSamples (parameters_.delaySeconds);
+            break;
+        case Stage::Attack:
+            samplesRemaining_ = durationSamples (parameters_.attackSeconds);
+            increment_ = samplesRemaining_ > 0 ? (1.0f - level_) / static_cast<float> (samplesRemaining_) : 0.0f;
+            break;
+        case Stage::Hold:
+            level_ = 1.0f;
+            samplesRemaining_ = durationSamples (parameters_.holdSeconds);
+            break;
+        case Stage::Decay:
+        {
+            const float sustain = std::clamp (parameters_.sustainLevel, 0.0f, 1.0f);
+            samplesRemaining_ = durationSamples (parameters_.decaySeconds);
+            increment_ = samplesRemaining_ > 0 ? (sustain - level_) / static_cast<float> (samplesRemaining_) : 0.0f;
+            break;
+        }
+        case Stage::Sustain:
+            level_ = std::clamp (parameters_.sustainLevel, 0.0f, 1.0f);
+            samplesRemaining_ = 0;
+            // A zone that decays to silence (sustain attenuation at maximum) is
+            // finished: retiring here frees the slot instead of holding a
+            // permanently silent voice until note-off.
+            if (level_ <= 0.0f)
+                enter (Stage::Idle);
+            break;
+        case Stage::Release:
+            samplesRemaining_ = durationSamples (releaseSeconds_);
+            increment_ = samplesRemaining_ > 0 ? -level_ / static_cast<float> (samplesRemaining_) : 0.0f;
+            break;
+        case Stage::Idle:
+            level_ = 0.0f;
+            samplesRemaining_ = 0;
+            break;
+    }
+}
+
+void Voice::VolumeEnvelope::startRelease (float seconds) noexcept
+{
+    if (stage_ == Stage::Idle || stage_ == Stage::Release)
+        return;
+
+    releaseSeconds_ = seconds;
+    enter (Stage::Release);
+}
+
+void Voice::VolumeEnvelope::prepare (int sampleRate) noexcept
+{
+    const int safeRate = std::max (1, sampleRate);
+    if (sampleRate_ == safeRate)
+        return;
+
+    sampleRate_ = safeRate;
+    // The envelope is configured before a voice reaches render().  Re-entering
+    // its current stage here turns its time value into source-rate samples once,
+    // without any allocation or a per-block reset.
+    enter (stage_);
+}
+
+float Voice::VolumeEnvelope::tick() noexcept
+{
+    if (stage_ == Stage::Idle)
+        return 0.0f;
+
+    switch (stage_)
+    {
+        case Stage::Delay:
+            if (samplesRemaining_-- > 0)
+                return 0.0f;
+            enter (Stage::Attack);
+            return level_;
+        case Stage::Attack:
+            if (samplesRemaining_ <= 0)
+            {
+                level_ = 1.0f;
+                enter (Stage::Hold);
+                return level_;
+            }
+            level_ += increment_;
+            if (--samplesRemaining_ == 0)
+            {
+                level_ = 1.0f;
+                enter (Stage::Hold);
+            }
+            return level_;
+        case Stage::Hold:
+            if (samplesRemaining_-- > 0)
+                return level_;
+            enter (Stage::Decay);
+            return level_;
+        case Stage::Decay:
+            if (samplesRemaining_ <= 0)
+            {
+                enter (Stage::Sustain);
+                return level_;
+            }
+            level_ += increment_;
+            if (--samplesRemaining_ == 0)
+                enter (Stage::Sustain);
+            return level_;
+        case Stage::Sustain:
+            return level_;
+        case Stage::Release:
+            if (samplesRemaining_ <= 0)
+            {
+                enter (Stage::Idle);
+                return 0.0f;
+            }
+            level_ += increment_;
+            if (--samplesRemaining_ == 0)
+                enter (Stage::Idle);
+            return level_;
+        case Stage::Idle:
+            return 0.0f;
+    }
+
+    return 0.0f;
+}
+
 double Voice::computePlayRate(const Sample* sample, int midiNote) const noexcept
 {
     const double semitones = static_cast<double> (midiNote - sample->rootKey)
@@ -81,6 +232,14 @@ void Voice::start(const Sample* sample, int midiNote, float velocity,
     active_ = true;
     driveNeedsReset_ = true;
     filterNeedsPrepare_ = true;
+    attenuationGain_ = std::pow (10.0f,
+                                 -std::clamp (std::isfinite (sample->attenuationDb)
+                                                  ? sample->attenuationDb : 0.0f,
+                                              0.0f, 144.0f) / 20.0f);
+    volumeEnvelope_.reset (sample->volumeEnvelope);
+    zoneReleaseMs_ = std::isfinite (sample->volumeEnvelope.releaseSeconds)
+        ? std::max (0.0f, sample->volumeEnvelope.releaseSeconds * 1000.0f)
+        : 0.0f;
 
     // Copy loop points at start(): render() must not read through a sample
     // pointer that may belong to a retired loader once this voice is retriggered
@@ -120,6 +279,14 @@ void Voice::retarget(const Sample* sample, int midiNote, const SF2Loader* sample
     bindSample (sample, sampleOwner);
     midiNote_ = midiNote;
     playRate_ = computePlayRate (sample, midiNote);
+    attenuationGain_ = std::pow (10.0f,
+                                 -std::clamp (std::isfinite (sample->attenuationDb)
+                                                  ? sample->attenuationDb : 0.0f,
+                                              0.0f, 144.0f) / 20.0f);
+    volumeEnvelope_.setParameters (sample->volumeEnvelope);
+    zoneReleaseMs_ = std::isfinite (sample->volumeEnvelope.releaseSeconds)
+        ? std::max (0.0f, sample->volumeEnvelope.releaseSeconds * 1000.0f)
+        : 0.0f;
 }
 
 void Voice::retire() noexcept
@@ -128,6 +295,8 @@ void Voice::retire() noexcept
     midiNote_ = -1;
     detachSample();
     envelopeLevel_ = 0.0f;
+    attenuationGain_ = 1.0f;
+    zoneReleaseMs_ = 0.0f;
 }
 
 void Voice::stop() noexcept
@@ -137,9 +306,21 @@ void Voice::stop() noexcept
     adsr_.noteOff();
 }
 
+void Voice::choke() noexcept
+{
+    if (!active_)
+        return;
+
+    // The SoundFont release is the instrument's own fade for this zone, which
+    // is exactly the length a choke wants: short enough that the new note is
+    // not doubled, long enough that cutting mid-waveform cannot click.
+    volumeEnvelope_.startRelease (juce::jlimit (0.0005f, 0.02f, zoneReleaseMs_ * 0.001f));
+}
+
 bool Voice::isReleasing() const noexcept
 {
-    return active_ && adsr_.stage() == x10::dsp::Adsr::Stage::Release;
+    return active_ && (adsr_.stage() == x10::dsp::Adsr::Stage::Release
+                       || volumeEnvelope_.isReleasing());
 }
 
 void Voice::render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
@@ -174,6 +355,7 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
         // level, stretching what should be a fixed-time fade indefinitely.
         adsr_.prepare (static_cast<double> (hostSampleRate));
     }
+    volumeEnvelope_.prepare (hostSampleRate);
 
     std::uint32_t filterOffsetBits = 0;
     static_assert (sizeof (filterOffsetBits) == sizeof (filterOffsetCents),
@@ -194,10 +376,16 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
         filterParametersCached_ = true;
     }
 
+    // The SoundFont zone release is a floor, not a replacement: a preset that
+    // states a long release keeps it, while the UI knob can only lengthen the
+    // tail past it. Combining them as a lower bound preserves the previous
+    // sound for the default 1 ms zone release.
+    const float effectiveReleaseMs = std::max (releaseMs, zoneReleaseMs_);
+
     // Push ADSR parameters only on change: the setters recompute the current
     // stage's ramp even for identical values, which would restart a Decay or
     // Release fade from the current level every block.
-    const float envParams[] = { attackMs, decayMs, sustainLevel, releaseMs };
+    const float envParams[] = { attackMs, decayMs, sustainLevel, effectiveReleaseMs };
     std::uint32_t hash = 2166136261u;
     for (float v : envParams)
     {
@@ -212,7 +400,7 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
         adsr_.setAttackSec (attackMs * 0.001f);
         adsr_.setDecaySec (decayMs * 0.001f);
         adsr_.setSustainLevel (std::clamp (sustainLevel, 0.0f, 1.0f));
-        adsr_.setReleaseSec (releaseMs * 0.001f);
+        adsr_.setReleaseSec (effectiveReleaseMs * 0.001f);
     }
 
     const float* sampleData = sample_->data.data();
@@ -280,9 +468,11 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
 
     for (int i = 0; i < numSamples; ++i)
     {
-        const float env = adsr_.tick();
+        const float globalEnv = adsr_.tick();
+        const float zoneEnv = volumeEnvelope_.tick();
+        const float env = globalEnv * zoneEnv;
         envelopeLevel_ = env;
-        if (env <= 0.0f && !adsr_.isActive())
+        if (!adsr_.isActive() || !volumeEnvelope_.isActive())
         {
             active_ = false;
             detachSample();
@@ -375,7 +565,7 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
                 return sampleData[static_cast<std::size_t>(tapIndex)];
             });
 
-        float sample = interpolated * velocity_ * env;
+        float sample = interpolated * velocity_ * env * attenuationGain_;
 
         if (filterRouting == 0) // Pre: filter before drive
             sample = filter_.process (sample);
@@ -439,12 +629,11 @@ int VoicePool::voiceIndexForNote(int midiNote) const noexcept
     if (midiNote < 0 || midiNote >= 128)
         return -1;
 
-    const int voiceIndex = noteToVoice_[static_cast<std::size_t>(midiNote)];
-    if (voiceIndex < 0 || static_cast<std::size_t>(voiceIndex) >= voices_.size())
-        return -1;
-
-    const Voice& voice = voices_[static_cast<std::size_t>(voiceIndex)];
-    return voice.isActive() && voice.note() == midiNote ? voiceIndex : -1;
+    const auto limit = std::min (static_cast<std::size_t> (polyphony_), voices_.size());
+    for (std::size_t index = 0; index < limit; ++index)
+        if (voices_[index].isActive() && voices_[index].note() == midiNote)
+            return static_cast<int> (index);
+    return -1;
 }
 
 void VoicePool::setPolyphony(int numVoices) noexcept
@@ -460,28 +649,7 @@ void VoicePool::setPolyphony(int numVoices) noexcept
     // so they cannot remain frozen, revive later, or retain MIDI state.
     for (std::size_t i = static_cast<std::size_t>(newLimit); i < voices_.size(); ++i)
     {
-        const int note = voices_[i].note();
-        if (note >= 0 && note < 128 && noteToVoice_[static_cast<std::size_t>(note)] == static_cast<int>(i))
-        {
-            noteToVoice_[static_cast<std::size_t>(note)] = -1;
-            pendingRelease_[static_cast<std::size_t>(note)] = false;
-            if (keyHeld_[static_cast<std::size_t>(note)])
-            {
-                keyHeld_[static_cast<std::size_t>(note)] = false;
-                if (heldKeyCount_ > 0)
-                    --heldKeyCount_;
-            }
-        }
         voices_[i].retire();
-    }
-    for (int note = 0; note < 128; ++note)
-    {
-        const auto noteIndex = static_cast<std::size_t>(note);
-        if (noteToVoice_[noteIndex] < newLimit)
-            continue;
-
-        noteToVoice_[noteIndex] = -1;
-        pendingRelease_[noteIndex] = false;
     }
     if (leadVoiceIndex_ >= newLimit)
         leadVoiceIndex_ = -1;
@@ -528,23 +696,76 @@ void VoicePool::setLegatoEnabled(bool enabled) noexcept
 void VoicePool::startVoice(Voice& voice, const Sample* sample, int midiNote, float velocity,
                            const SF2Loader* sampleOwner) noexcept
 {
-    const int voiceIndex = static_cast<int> (&voice - voices_.data());
-    const int victimNote = voice.note();
-    if (victimNote >= 0 && victimNote < 128
-        && noteToVoice_[static_cast<std::size_t>(victimNote)] == voiceIndex)
-        noteToVoice_[static_cast<std::size_t>(victimNote)] = -1;
-
     voice.start (sample, midiNote, velocity, sampleOwner);
     voice.setStartSequence (nextStartSequence_++);
-    noteToVoice_[static_cast<std::size_t>(midiNote)] = voiceIndex;
-    leadVoiceIndex_ = voiceIndex;
 }
 
 void VoicePool::start(const Sample* sample, int midiNote, float velocity,
                       const SF2Loader* sampleOwner) noexcept
 {
+    if (sample == nullptr)
+        return;
+
+    const std::array<const Sample*, 1> samples { sample };
+    start (std::span<const Sample* const> { samples.data(), samples.size() }, midiNote, velocity, sampleOwner);
+}
+
+void VoicePool::chokeExclusiveClass(std::uint8_t exclusiveClass) noexcept
+{
+    if (exclusiveClass == 0)
+        return;
+
+    for (std::size_t index = 0; index < voices_.size(); ++index)
+    {
+        Voice& voice = voices_[index];
+        if (voice.isActive() && voice.exclusiveClass() == exclusiveClass)
+        {
+            // Fade rather than cut: an exclusiveClass choke fires on the new
+            // note-on, which is usually the loudest point of the old one.
+            voice.choke();
+            if (leadVoiceIndex_ == static_cast<int> (index))
+                leadVoiceIndex_ = -1;
+        }
+    }
+}
+
+void VoicePool::start(std::span<const Sample* const> samples, int midiNote, float velocity,
+                      const SF2Loader* sampleOwner) noexcept
+{
     if (midiNote < 0 || midiNote >= 128)
         return;
+
+    std::array<const Sample*, maxLayersPerNote> layers {};
+    std::size_t layerCount = 0;
+    for (const Sample* sample : samples)
+    {
+        if (sample == nullptr)
+            continue;
+        if (layerCount == layers.size())
+            break;
+        layers[layerCount++] = sample;
+    }
+    if (layerCount == 0)
+        return;
+
+    // SF2 exclusiveClass is a group choke, not a note mapping. Choke a group
+    // once before its new layers begin so a closed hi-hat reliably retires an
+    // open hi-hat even when the preset uses several overlapping regions.
+    std::array<std::uint8_t, maxLayersPerNote> classes {};
+    std::size_t classCount = 0;
+    for (std::size_t layer = 0; layer < layerCount; ++layer)
+    {
+        const auto exclusiveClass = layers[layer]->exclusiveClass;
+        if (exclusiveClass == 0)
+            continue;
+        bool seen = false;
+        for (std::size_t index = 0; index < classCount; ++index)
+            seen = seen || classes[index] == exclusiveClass;
+        if (!seen)
+            classes[classCount++] = exclusiveClass;
+    }
+    for (std::size_t index = 0; index < classCount; ++index)
+        chokeExclusiveClass (classes[index]);
 
     // A note-on always clears any pending deferred release for that same
     // note number: if it was released and re-pressed while the pedal was
@@ -559,41 +780,77 @@ void VoicePool::start(const Sample* sample, int midiNote, float velocity,
         ++heldKeyCount_;
     }
 
-    // Legato: with the mode on and at least one other key already held
-    // (i.e. this is not the first note of a new phrase) retarget the current
-    // lead voice in place instead of triggering a fresh envelope, so the
-    // pitch glides on the same voice.
+    const auto limit = std::min (static_cast<std::size_t> (polyphony_), voices_.size());
+
+    // Legato retargets every layer of the current lead note. A one-layer
+    // preset stays byte-for-byte on the previous path, while a stacked SF2
+    // layer no longer leaves an old velocity/round-robin sample sounding.
     if (legatoEnabled_ && !alreadyHeld && heldKeyCount_ > 1
         && leadVoiceIndex_ >= 0 && static_cast<std::size_t>(leadVoiceIndex_) < voices_.size()
         && voices_[static_cast<std::size_t>(leadVoiceIndex_)].isActive())
     {
-        Voice& lead = voices_[static_cast<std::size_t>(leadVoiceIndex_)];
-        const int previousNote = lead.note();
-        lead.retarget (sample, midiNote, sampleOwner);
-        if (previousNote >= 0 && previousNote < 128 && previousNote != midiNote
-            && noteToVoice_[static_cast<std::size_t>(previousNote)] == leadVoiceIndex_)
-            noteToVoice_[static_cast<std::size_t>(previousNote)] = -1;
-        noteToVoice_[static_cast<std::size_t>(midiNote)] = leadVoiceIndex_;
+        const int previousNote = voices_[static_cast<std::size_t>(leadVoiceIndex_)].note();
+        std::array<int, maxLayersPerNote> existing {};
+        std::size_t existingCount = 0;
+        for (std::size_t index = 0; index < limit; ++index)
+            if (voices_[index].isActive() && voices_[index].note() == previousNote)
+            {
+                if (existingCount < existing.size())
+                    existing[existingCount++] = static_cast<int> (index);
+                else
+                    voices_[index].retire();
+            }
+
+        int newLead = -1;
+        for (std::size_t layer = 0; layer < layerCount; ++layer)
+        {
+            Voice* voice = layer < existingCount
+                ? &voices_[static_cast<std::size_t>(existing[layer])]
+                : findFreeVoice();
+            if (voice == nullptr)
+                break;
+            if (layer < existingCount)
+                voice->retarget (layers[layer], midiNote, sampleOwner);
+            else
+                startVoice (*voice, layers[layer], midiNote, velocity, sampleOwner);
+            if (newLead < 0)
+                newLead = static_cast<int> (voice - voices_.data());
+        }
+        for (std::size_t layer = layerCount; layer < existingCount; ++layer)
+            voices_[static_cast<std::size_t>(existing[layer])].retire();
+        leadVoiceIndex_ = newLead;
         return;
     }
 
-    // Retrigger: if this note already owns a voice, reset it in place instead
-    // of allocating a fresh slot. Without this, mashing one key consumes a new
-    // voice per press and the old voice keeps ringing underneath.
-    const int existing = noteToVoice_[static_cast<std::size_t>(midiNote)];
-    if (existing >= 0 && static_cast<std::size_t>(existing) < voices_.size()
-        && voices_[static_cast<std::size_t>(existing)].note() == midiNote
-        && voices_[static_cast<std::size_t>(existing)].isActive())
+    // Retrigger every existing layer of the key in place. This keeps repeated
+    // presses bounded without collapsing an overlapping zone stack to one
+    // voice.
+    std::array<int, maxLayersPerNote> existing {};
+    std::size_t existingCount = 0;
+    for (std::size_t index = 0; index < limit; ++index)
+        if (voices_[index].isActive() && voices_[index].note() == midiNote)
+        {
+            if (existingCount < existing.size())
+                existing[existingCount++] = static_cast<int> (index);
+            else
+                voices_[index].retire();
+        }
+
+    int newLead = -1;
+    for (std::size_t layer = 0; layer < layerCount; ++layer)
     {
-        startVoice (voices_[static_cast<std::size_t>(existing)], sample, midiNote, velocity, sampleOwner);
-        return;
+        Voice* voice = layer < existingCount
+            ? &voices_[static_cast<std::size_t>(existing[layer])]
+            : findFreeVoice();
+        if (voice == nullptr)
+            break;
+        startVoice (*voice, layers[layer], midiNote, velocity, sampleOwner);
+        if (newLead < 0)
+            newLead = static_cast<int> (voice - voices_.data());
     }
-
-    Voice* voice = findFreeVoice();
-    if (voice == nullptr)
-        return;
-
-    startVoice (*voice, sample, midiNote, velocity, sampleOwner);
+    for (std::size_t layer = layerCount; layer < existingCount; ++layer)
+        voices_[static_cast<std::size_t>(existing[layer])].retire();
+    leadVoiceIndex_ = newLead;
 }
 
 void VoicePool::stop(int midiNote) noexcept
@@ -628,13 +885,10 @@ void VoicePool::releaseNote(int midiNote) noexcept
     if (midiNote < 0 || midiNote >= 128)
         return;
 
-    const int voiceIdx = noteToVoice_[static_cast<std::size_t>(midiNote)];
-    // Guard against a stale index: the slot may have been recycled for a
-    // different note since this note's note-off, so only release it if it is
-    // still actually sounding this note.
-    if (voiceIdx >= 0 && static_cast<std::size_t>(voiceIdx) < voices_.size()
-        && voices_[static_cast<std::size_t>(voiceIdx)].note() == midiNote)
-        voices_[static_cast<std::size_t>(voiceIdx)].stop();
+    const auto limit = std::min (static_cast<std::size_t> (polyphony_), voices_.size());
+    for (std::size_t index = 0; index < limit; ++index)
+        if (voices_[index].isActive() && voices_[index].note() == midiNote)
+            voices_[index].stop();
 }
 
 void VoicePool::stopAll() noexcept
@@ -645,6 +899,17 @@ void VoicePool::stopAll() noexcept
     heldKeyCount_ = 0;
     pendingRelease_.fill (false);
     leadVoiceIndex_ = -1;
+}
+
+void VoicePool::setBankTokenForNote(int midiNote, const BankToken& token) noexcept
+{
+    if (midiNote < 0 || midiNote >= 128)
+        return;
+
+    const auto limit = std::min (static_cast<std::size_t> (polyphony_), voices_.size());
+    for (std::size_t index = 0; index < limit; ++index)
+        if (voices_[index].isActive() && voices_[index].note() == midiNote)
+            voices_[index].setBankToken (token);
 }
 
 Voice* VoicePool::findFreeVoice() noexcept
@@ -723,21 +988,22 @@ void VoicePool::render(float* output, int numSamples, int hostSampleRate, float 
                               curveId, filterRouting, filterOffsetCents,
                               attackMs, decayMs, sustainLevel, releaseMs,
                               pitchBendSemitones, vibratoDepthCents, *interpolator_);
-            if (!voices_[i].isActive())
-            {
-                const int note = voices_[i].note();
-                if (note >= 0 && note < 128
-                    && noteToVoice_[static_cast<std::size_t>(note)] == static_cast<int>(i))
-                    noteToVoice_[static_cast<std::size_t>(note)] = -1;
-            }
         }
 }
 
-VoicePool::StereoGains VoicePool::stereoGainsForVoice (std::size_t voiceIndex, float width) noexcept
+VoicePool::StereoGains VoicePool::stereoGainsForVoice (std::size_t voiceIndex, float width,
+                                                       float samplePan) noexcept
 {
     const float safeWidth = juce::jlimit (0.0f, 1.0f, width);
     const float position = kStereoVoicePositions[voiceIndex % kStereoVoicePositions.size()];
-    const float pan = juce::jlimit (0.0f, 1.0f, 0.5f + position * safeWidth);
+    const float zonePan = juce::jlimit (-1.0f, 1.0f,
+                                        std::isfinite (samplePan) ? samplePan : 0.0f);
+    // Zone pan claims the image first. The synthetic voice spread fills only
+    // the remaining space, so a SoundFont's hard-panned zone remains hard
+    // panned while a centred zone preserves the established stereo layout.
+    const float pan = juce::jlimit (0.0f, 1.0f,
+                                    0.5f + zonePan * 0.5f
+                                    + position * safeWidth * (1.0f - std::abs (zonePan)));
 
     return { kEqualPowerUnityScale * std::sin ((1.0f - pan) * kEqualPowerHalfPi),
              kEqualPowerUnityScale * std::sin (pan * kEqualPowerHalfPi) };
@@ -785,15 +1051,7 @@ void VoicePool::renderStereo(float* outputLeft, float* outputRight, int numSampl
                                attackMs, decayMs, sustainLevel, releaseMs,
                                pitchBendSemitones, vibratoDepthCents, *interpolator_);
 
-            if (! voices_[i].isActive())
-            {
-                const int note = voices_[i].note();
-                if (note >= 0 && note < 128
-                    && noteToVoice_[static_cast<std::size_t> (note)] == static_cast<int> (i))
-                    noteToVoice_[static_cast<std::size_t> (note)] = -1;
-            }
-
-            const auto gains = stereoGainsForVoice (i, stereoWidth);
+            const auto gains = stereoGainsForVoice (i, stereoWidth, voices_[i].samplePan());
             juce::FloatVectorOperations::addWithMultiply (outputLeft, scratch, gains.left, numSamples);
             juce::FloatVectorOperations::addWithMultiply (outputRight, scratch, gains.right, numSamples);
         }

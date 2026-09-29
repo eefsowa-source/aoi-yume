@@ -2,6 +2,7 @@
 #include <catch2/catch_approx.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <vector>
 
@@ -22,6 +23,9 @@ aod::Sample makeTone()
         s.data[static_cast<std::size_t> (i)] = std::sin (2.0f * 3.14159265f * 1000.0f * static_cast<float> (i)
                                                          / static_cast<float> (kSampleRate));
     s.sampleRate = kSampleRate;
+    // Zero-length SoundFont envelope stages keep this fixture focused on the
+    // ADSR and voice state; zone-envelope behavior has its own cases below.
+    s.volumeEnvelope = { 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f };
     return s;
 }
 
@@ -67,6 +71,88 @@ TEST_CASE ("voice pool starts all 128 MIDI notes concurrently", "[dsp][rt][voice
     REQUIRE (pool.activeVoiceCount() == 128);
     for (int note = 0; note < 128; ++note)
         REQUIRE (pool.voiceIndexForNote (note) == note);
+}
+
+TEST_CASE ("overlapping SoundFont zones start and release as one MIDI note", "[dsp][voice][sf2]")
+{
+    aod::VoicePool pool (4);
+    const aod::Sample first = makeTone();
+    const aod::Sample second = makeTone();
+    const std::array<const aod::Sample*, 2> layers { &first, &second };
+
+    pool.start (layers, 60, 0.8f);
+
+    REQUIRE (pool.activeVoiceCount() == 2);
+    REQUIRE (pool.voiceIndexForNote (60) >= 0);
+
+    pool.stop (60);
+    std::array<float, kBlockSize> output {};
+    pool.render (output.data(), kBlockSize, kSampleRate,
+                 0.0f, 0.0f, 0, 0, 0.0f,
+                 0.0f, 1000.0f, 1.0f, 1000.0f,
+                 0.0f, 0.0f);
+    REQUIRE (pool.activeVoiceCount() == 2);
+}
+
+TEST_CASE ("SoundFont exclusive class chokes every matching layer", "[dsp][voice][sf2]")
+{
+    aod::VoicePool pool (4);
+    aod::Sample openHat = makeTone();
+    aod::Sample closedHat = makeTone();
+    openHat.exclusiveClass = 7;
+    closedHat.exclusiveClass = 7;
+
+    pool.start (&openHat, 46, 0.8f);
+    pool.start (&closedHat, 42, 0.8f);
+
+    // The choke fades the old voice instead of cutting it, so it is still
+    // sounding during the first samples of the new note.
+    std::array<float, 16> fade {};
+    pool.render (fade.data(), static_cast<int> (fade.size()), kSampleRate,
+                 0.0f, 0.0f, 0, 0, 0.0f,
+                 0.0f, 0.0f, 1.0f, 1000.0f,
+                 0.0f, 0.0f);
+    REQUIRE (pool.activeVoiceCount() == 2);
+    REQUIRE (blockPeak (fade.data(), static_cast<int> (fade.size())) > 0.0f);
+
+    std::array<float, kBlockSize> block {};
+    pool.render (block.data(), kBlockSize, kSampleRate,
+                 0.0f, 0.0f, 0, 0, 0.0f,
+                 0.0f, 0.0f, 1.0f, 1000.0f,
+                 0.0f, 0.0f);
+
+    REQUIRE (pool.activeVoiceCount() == 1);
+    REQUIRE (pool.voiceIndexForNote (46) == -1);
+    REQUIRE (pool.voiceIndexForNote (42) >= 0);
+}
+
+TEST_CASE ("SoundFont attenuation applies before the voice chain", "[dsp][voice][sf2]")
+{
+    aod::Sample unity;
+    unity.data.assign (4096, 1.0f);
+    unity.sampleRate = kSampleRate;
+    unity.volumeEnvelope = { 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.1f };
+
+    // -6.0206 dB is exactly half amplitude, so the ratio isolates the
+    // generator from every other gain in the voice chain.
+    aod::Sample half = unity;
+    half.attenuationDb = 6.0206f;
+
+    const auto peakFor = [] (aod::Sample& sample)
+    {
+        aod::VoicePool pool (1);
+        pool.start (&sample, 60, 1.0f);
+        std::array<float, 256> output {};
+        pool.render (output.data(), static_cast<int> (output.size()), kSampleRate,
+                     0.0f, 0.0f, 0, 0, 0.0f,
+                     0.0f, 0.0f, 1.0f, 1000.0f,
+                     0.0f, 0.0f);
+        return blockPeak (output.data(), static_cast<int> (output.size()));
+    };
+
+    const float unityPeak = peakFor (unity);
+    REQUIRE (unityPeak > 0.0f);
+    REQUIRE (peakFor (half) / unityPeak == Catch::Approx (0.5f).margin (0.01f));
 }
 
 TEST_CASE ("normalized sustain remains audible after decay", "[dsp][voice][level]")
