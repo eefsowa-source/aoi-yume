@@ -59,14 +59,16 @@ void FxProcessor::process (juce::AudioBuffer<float>& buffer,
     reverb_.setParameters (params);
     reverb_.process (context);
 
-    const float safeBpm = std::isfinite (bpm) ? juce::jlimit (30.0f, 300.0f, bpm) : 120.0f;
+    const float safeBpm = std::isfinite (bpm) && bpm > 0.0f ? bpm : 120.0f;
     const int maxDelay = static_cast<int> (delayLeft_.size());
     if (maxDelay <= 1)
         return;
 
     // Fixed dotted-eighth sync: 1/8D = three sixteenth notes = 45/BPM sec.
-    const int requestedDelay = juce::jlimit (1, maxDelay - 1,
-        static_cast<int> (std::lround (sampleRate_ * 45.0 / static_cast<double> (safeBpm))));
+    const double requestedDelaySamples = sampleRate_ * 45.0 / static_cast<double> (safeBpm);
+    const double boundedDelaySamples = std::clamp (requestedDelaySamples, 1.0,
+                                                   static_cast<double> (maxDelay - 1));
+    const int requestedDelay = static_cast<int> (std::lround (boundedDelaySamples));
     delaySamples_ = requestedDelay;
     const float wet = juce::jlimit (0.0f, 1.0f, std::isfinite (delayMix) ? delayMix : 0.0f);
     const float feedback = juce::jlimit (0.0f, 0.95f, std::isfinite (delayFeedback) ? delayFeedback : 0.35f);

@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_root="${0:A:h:h}"
 build_root="${BUILD_ROOT:-$repo_root/build-plugin/plugins/rompler/EONDS50_artefacts/RelWithDebInfo}"
-install_root="${INSTALL_ROOT:-/Users/sungha/Library/Audio/Plug-Ins}"
+install_root="${INSTALL_ROOT:-${HOME}/Library/Audio/Plug-Ins}"
 backup_root="${BACKUP_ROOT:-$install_root/.aoi-yume-backups}"
 skip_signature="${SKIP_SIGNATURE:-0}"
 dry_run="${DRY_RUN:-0}"
