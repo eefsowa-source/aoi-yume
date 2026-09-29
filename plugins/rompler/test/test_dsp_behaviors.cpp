@@ -48,6 +48,46 @@ float tailRms (const std::vector<float>& output, int tailSamples)
 
     return std::sqrt (sumSquares / static_cast<float> (static_cast<int> (output.size()) - firstSample));
 }
+
+/** Estimate the fundamental by counting zero crossings over an explicit
+    [first, first+window) slice. Counting crossings rather than taking an FFT
+    is enough for the single question these tests ask - did the pitch move, and
+    by how much - and it stays exact for the integer-cycle fixtures used here. */
+float windowFrequency (const std::vector<float>& signal, int first, int window, int sampleRate)
+{
+    const int from = juce::jmax (1, first);
+    const int to = juce::jmin (static_cast<int> (signal.size()), from + window);
+    if (to <= from)
+        return 0.0f;
+
+    int crossings = 0;
+    for (int i = from; i < to; ++i)
+        if ((signal[static_cast<std::size_t> (i - 1)] < 0.0f)
+            != (signal[static_cast<std::size_t> (i)] < 0.0f))
+            ++crossings;
+
+    const auto seconds = static_cast<float> (to - from) / static_cast<float> (sampleRate);
+    return seconds > 0.0f ? static_cast<float> (crossings) / seconds * 0.5f : 0.0f;
+}
+/** RMS over an explicit [first, first+window) slice. Tests that compare
+    levels pick the window themselves: a fixture that is only as long as its
+    sample goes silent at the end, so measuring the final samples measures the
+    end of the buffer rather than the filter. */
+float windowRms (const std::vector<float>& signal, int first, int window)
+{
+    const int from = juce::jmax (0, first);
+    const int to = juce::jmin (static_cast<int> (signal.size()), from + window);
+    if (to <= from)
+        return 0.0f;
+
+    double sumSquares = 0.0;
+    for (int i = from; i < to; ++i)
+    {
+        const auto x = static_cast<double> (signal[static_cast<std::size_t> (i)]);
+        sumSquares += x * x;
+    }
+    return static_cast<float> (std::sqrt (sumSquares / (to - from)));
+}
 } // namespace
 
 TEST_CASE ("voice pool prepares the public 128-voice default capacity", "[dsp][voice]")
@@ -192,6 +232,175 @@ TEST_CASE ("voice velocity follows the SoundFont curve", "[dsp][voice][sf2]")
         CAPTURE (velocity, expectedDb, relativeDb);
         REQUIRE (relativeDb == Catch::Approx (expectedDb).margin (0.15f));
     }
+}
+
+TEST_CASE ("a zone with no modulation depth renders exactly as before", "[dsp][voice][sf2]")
+{
+    // The whole stage rests on a zero modEnv depth being a true identity: a
+    // zone that states no modulation has to render exactly as it did before
+    // this existed. What this can prove without the old binary is that the
+    // depth is the only thing that changes the output - clearing the depths
+    // has to make the modulation disappear entirely, leaving a voice that is
+    // still alive and still producing signal.
+    aod::Sample withDepths = makeTone();
+    withDepths.modulationEnvelope = { 0.02f, 0.01f, 0.01f, 0.05f, 0.5f, 0.05f };
+    withDepths.modEnvToPitchCents  = 1200.0f;
+    withDepths.modEnvToFilterCents = -1200.0f;
+
+    aod::Sample noDepths = withDepths;
+    noDepths.modEnvToPitchCents  = 0.0f;
+    noDepths.modEnvToFilterCents = 0.0f;
+
+    const auto render = [] (const aod::Sample& s)
+    {
+        aod::VoicePool pool (1);
+        pool.start (&s, 60, 1.0f);
+        std::vector<float> out (static_cast<std::size_t> (kSampleRate), 0.0f);
+        std::vector<float> block (static_cast<std::size_t> (kBlockSize), 0.0f);
+        for (int b = 0; b < static_cast<int> (out.size()) / kBlockSize; ++b)
+        {
+            std::fill (block.begin(), block.end(), 0.0f);
+            pool.render (block.data(), kBlockSize, kSampleRate,
+                         0.0f, 0.0f, 0, 1, 0.0f,
+                         0.0f, 0.0f, 1.0f, 1000.0f, 0.0f, 0.0f);
+            std::copy (block.begin(), block.end(),
+                       out.begin() + static_cast<std::ptrdiff_t> (b) * kBlockSize);
+        }
+        return out;
+    };
+
+    const auto modulated = render (withDepths);
+    const auto plain = render (noDepths);
+
+    // The modulated zone must actually differ, or the comparison below would
+    // pass for the wrong reason.
+    float largestDifference = 0.0f;
+    for (std::size_t i = 0; i < plain.size(); ++i)
+        largestDifference = std::max (largestDifference,
+                                      std::abs (modulated[i] - plain[i]));
+    CAPTURE (largestDifference);
+    REQUIRE (largestDifference > 0.01f);
+
+    // With the depths cleared the voice must still be sounding: an inert
+    // modulation path means the envelope was never ticked, not that the voice
+    // was silenced by an envelope that ran to its end.
+    const float plainLevel = windowRms (plain, kSampleRate / 4, kSampleRate / 4);
+    CAPTURE (plainLevel);
+    REQUIRE (plainLevel > 0.1f);
+}
+
+TEST_CASE ("zone modulation envelope moves the voice pitch", "[dsp][voice][sf2]")
+{
+    // modEnvToPitchCents says how far the zone's modulation envelope swings
+    // the pitch. The envelope starts high and decays toward its sustain, so a
+    // positive depth bends the attack up by the stated number of cents and
+    // settles back as the envelope falls. A zero depth must be a true no-op.
+    aod::Sample sample = makeTone();
+    // Attack 50 ms, instant decay to a full sustain, so the whole test window
+    // sits in a steady state and the frequency reading is not a transient.
+    sample.modulationEnvelope = { 0.05f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f };
+    sample.modEnvToPitchCents = 0.0f;
+
+    const auto renderTailFrequency = [&] (float cents)
+    {
+        sample.modEnvToPitchCents = cents;
+        aod::VoicePool pool (1);
+        pool.start (&sample, 60, 1.0f);
+
+        // 1 s of tail at 48 kHz, rendered in blocks so the envelope settles
+        // before anything is measured.
+        std::vector<float> tail (static_cast<std::size_t> (kSampleRate), 0.0f);
+        std::vector<float> block (static_cast<std::size_t> (kBlockSize), 0.0f);
+        std::fill (tail.begin(), tail.end(), 0.0f);
+        for (int b = 0; b < static_cast<int> (tail.size()) / kBlockSize; ++b)
+        {
+            std::fill (block.begin(), block.end(), 0.0f);
+            pool.render (block.data(), kBlockSize, kSampleRate,
+                         0.0f, 0.0f, 0, 0, 0.0f,
+                         0.0f, 0.0f, 1.0f, 1000.0f,
+                         0.0f, 0.0f);
+            std::copy (block.begin(), block.end(),
+                       tail.begin() + static_cast<std::ptrdiff_t> (b) * kBlockSize);
+        }
+        // Measure well past the 50 ms attack, over a whole number of 1 kHz
+        // cycles at the flat rate so the crossing count is exact.
+        return windowFrequency (tail, kSampleRate / 4, kSampleRate / 20, kSampleRate);
+    };
+
+    // The fixture is a 1000 Hz sine and the zone envelope sits at sustain 1.0,
+    // so an unmodulated voice must read back at the fixture frequency.
+    const float flat = renderTailFrequency (0.0f);
+    CAPTURE (flat);
+    REQUIRE (flat == Catch::Approx (1000.0f).margin (25.0f));
+
+    // 1200 cents is one octave. With a full-sustain modulation envelope the
+    // whole tail should be an octave up; a smaller depth has to land in
+    // between, which is what proves the depth is read as a real ratio and not
+    // simply switched on.
+    const float octave = renderTailFrequency (1200.0f);
+    CAPTURE (octave);
+    REQUIRE (octave == Catch::Approx (2000.0f).margin (60.0f));
+
+    const float half = renderTailFrequency (600.0f);
+    CAPTURE (half);
+    REQUIRE (half > flat + 200.0f);
+    REQUIRE (half < octave - 200.0f);
+}
+
+TEST_CASE ("zone modulation envelope moves the voice filter cutoff", "[dsp][voice][sf2]")
+{
+    // modEnvToFilterCents sweeps the zone's cutoff. With a sustain of 1.0 the
+    // envelope holds its peak, so the tail is rendered at a cutoff shifted by
+    // the stated number of cents. Negative cents close the filter, which shows
+    // up as less energy at the fixture's 1 kHz.
+    aod::Sample sample = makeTone();
+    // The fixture is a 1 kHz tone and the zone cutoff starts an octave below
+    // it, so a downward sweep is immediately audible while an upward sweep
+    // opens it fully. A 12 dB/oct slope barely moves a tone that is already
+    // an octave below the corner, so the fixture has to sit close to it for
+    // the depth to be measurable at all.
+    sample.filterCutoffHz = 500.0f;
+    sample.filterResonanceDb = 0.0f;
+    sample.modulationEnvelope = { 0.05f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f };
+    sample.modEnvToFilterCents = 0.0f;
+
+    const auto renderTailLevel = [&] (float cents)
+    {
+        sample.modEnvToFilterCents = cents;
+        aod::VoicePool pool (1);
+        pool.start (&sample, 60, 1.0f);
+
+        std::vector<float> tail (static_cast<std::size_t> (kSampleRate), 0.0f);
+        std::vector<float> block (static_cast<std::size_t> (kBlockSize), 0.0f);
+        for (int b = 0; b < static_cast<int> (tail.size()) / kBlockSize; ++b)
+        {
+            std::fill (block.begin(), block.end(), 0.0f);
+            pool.render (block.data(), kBlockSize, kSampleRate,
+                         0.0f, 0.0f, 0, 1, 0.0f,
+                         0.0f, 0.0f, 1.0f, 1000.0f,
+                         0.0f, 0.0f);
+            std::copy (block.begin(), block.end(),
+                       tail.begin() + static_cast<std::ptrdiff_t> (b) * kBlockSize);
+        }
+        return windowRms (tail, kSampleRate / 4, kSampleRate / 2);
+    };
+
+    const float open = renderTailLevel (0.0f);
+    CAPTURE (open);
+    REQUIRE (open > 0.0f);
+
+    // +1200 cents lifts the corner from 500 Hz to 1 kHz, right onto the tone, so
+    // the level rises clearly. A filter that ignored the depth would read
+    // exactly the same as the open case.
+    const float opened = renderTailLevel (1200.0f);
+    CAPTURE (opened, open);
+    REQUIRE (opened > open * 1.5f);
+
+    // Far enough down and the tone is cut for real, which separates a working
+    // depth from one that is merely scaling the cutoff a little.
+    const float shut = renderTailLevel (-2400.0f);
+    CAPTURE (shut, open);
+    REQUIRE (shut < open * 0.5f);
 }
 
 

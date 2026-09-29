@@ -401,3 +401,71 @@ FX 레일 끝의 두 knob(27 DELAY MIX, 28 PING-PONG FEEDBACK)만 legend overrid
   `pluginval_vst3_strictness10` 통과(28.96초).
 
 미검증: 실제 DAW에서 Tab 키 이동과 스크린리더 음성 확인은 사용자만 가능하다.
+
+### SQ-2 2단계 - modEnv를 피치와 필터에 연결 (2026-09-30)
+
+Region에는 modulationEnvelope, modEnvToPitchCents, modEnvToFilterCents가 이미
+있고 Sf2Flattener.cpp:436-444가 값을 채웠다. 비어 있던 건 전선이었다:
+SF2Loader가 volumeEnvelope만 Sample로 복사하고 나머지 셋을 버렸다. 그래서
+modEnv를 가진 존은 파싱만 하고 재생에서 아무 일도 일어나지 않았다.
+
+변경은 세 곳이다.
+
+- Sample에 modulationEnvelope과 두 깊이(센티벨)를 추가했다. 기본값 0은
+  구조적 무변조라서, modEnv를 명시하지 않는 존은 소리가 그대로다.
+- 로더가 세 필드를 복사한다.
+- 보이스가 두 번째 VolumeEnvelope 인스턴스를 갖고, 깊이가 하나라도 0이 아니면
+  매 블록 prepare하고 매 샘플 tick한다. start()와 retarget() 양쪽에서
+  bindModulation()이 깊이를 검사해 스위치를 걸고 envelope를 (재)시작한다.
+  legato로 다른 존으로 옮길 때 이전 존의 모듈레이션 상태를 물려받지 않기 위해
+  setParameters가 아니라 reset을 쓴다.
+
+피치는 vibrato와 같은 지수 경로에 합성했다. effectiveRate *= exp2(modLevel *
+modEnvToPitchCents / 1200). 가산항으로 넣지 않은 이유는 modEnv 스윕과 CC1
+비브라토가 서로 배가 되게 해야 하기 때문이다. 둘 다 0이면 식이 항등으로 축약된다.
+
+필터는 블록당 한 번이 아니라 16샘플마다 갱신한다(kModulationSubBlock).
+TptSvf::setCutoff는 계수만 다시 계산하고 지연선(s1_, s2_)은 유지하므로 cutoff가
+끊김 없이 미끄러진다. prepare()는 상태를 리셋하므로 쓰지 않는다. 비용은 tan 한 번과
+나눗셈 몇 번이고 할당이 없다. Q는 filterQ_로 캐시해 스윕마다 공진 항을 다시
+계산하지 않게 했다. 깊이가 0인 존은 이 블록 전체를 건너뛴다.
+
+검증:
+
+- modulation depths are carried in cents (test_sf2_flattener) - flattener가
+  센티벨 단위로 값을 보존하고, 기본값이 진짜 0인지 확인.
+- zone modulation envelope moves the voice pitch - 0센티는 1000 Hz 그대로,
+  1200센티는 한 옥타브 위, 600센티는 그 사이. 깊이가 켜짐/꺼짐이 아니라 실제
+  비율로 읽힌다는 증거.
+- zone modulation envelope moves the voice filter cutoff - 코너를 500 Hz에 두고
+  +1200센티로 열면 레벨이 확실히 오르고, -2400센티로 닫으면 절반 이하로 떨어진다.
+  처음에는 1 kHz 픽스처에 8 kHz 코너를 썼는데, 12 dB/oct 기울기에서 한 옥타브
+  차이는 3 dB밖에 안 되어 측정되지 않았다. 픽스처를 코너 근처로 옮겨야 깊이가
+  보인다.
+- a zone with no modulation depth renders exactly as before - 깊이를 켠 존과 끈
+  존의 출력이 실제로 다르고, 끈 쪽이 유효 신호를 유지하는지 확인.
+- stereo render performs no audio-thread allocations after prepare 통과. 새 코드도
+  오디오 스레드에서 할당하지 않는다.
+- ctest --preset dev 88/88, ctest --preset plugin 201/201,
+  pluginval_vst3_strictness10 통과(29.08초), auval -v aumu AoYu EonL 성공.
+
+CPU: [benchmark] 매트릭스 전부 통과. 96k/64/128에서 sustained run에 miss가
+1/45000 나왔는데, 같은 머신에서 직전 커밋(593891f)을 stash로 빼서 재측정하면
+39/45000이었다. 재현되는 부하 노이즈이지 이 변경의 회귀가 아니다. SQ-8의 0 miss
+목표는 여전히 미달 상태로 남는다.
+
+로컬 코퍼스 실측에서 확인한 사실: 스캔한 뱅크들은 모두 modEnv 깊이가 0이었다.
+라이브러리는 정확하지만 이 뱅크들에서는 들리지 않는다. 실제 차이를 들으려면
+깊이를 명시한 뱅크가 필요하다.
+
+빌드 산출물 SHA256(RelWithDebInfo, 593891f 이후 워크트리):
+
+    7b1c4b3e38d45c04a225300fbde6ac71bb7c03afe1928e0428a59bb0a4c8cd89  VST3/Aoi YUME.vst3/Contents/MacOS/Aoi YUME
+    2d31c9f5eddad9e1cc83af4d53c4210700ebc1391f0eaea63093788e5849f616  AU/Aoi YUME.component/Contents/MacOS/Aoi YUME
+    57afd6deff1c4f6785d6c1e95aeab3c48b57202b07fc0e1eeed8fd1914b4fe0a  Standalone/Aoi YUME.app/Contents/MacOS/Aoi YUME
+
+설치된 ~/Library/Audio/Plug-Ins/는 여전히 이전 바이너리다. 재설치는 요청 있을 때만 한다.
+
+미검증: 실제 DAW 로딩과 청취. 기본 입력 장치는 Audient iD14 하나뿐이라
+(10 in/4 out, Mac Studio Speakers와 UDEA Monitor는 출력 전용), 호스트 게이트를 열려면
+드라이버를 고치거나 우회해야 한다.

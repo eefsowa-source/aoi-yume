@@ -274,6 +274,39 @@ TEST_CASE ("unit conversions land in engine units", "[sf2][flatten]")
         const Fixture fixture { builder };
         REQUIRE (std::abs (fixture.onlyRegion().modulationEnvelope.sustainLevel - 0.75f) < kTolerance);
     }
+
+    SECTION ("modulation depth to pitch and filter is carried in cents")
+    {
+        Sf2Builder builder;
+        builder.presets     = { simplePreset() };
+        builder.instruments = { simpleInstrument ({ { genModEnvToPitch, 1200 },
+                                                    { genModEnvToFilterFc, -2400 } }) };
+
+        const Fixture fixture { builder };
+        const auto& region = fixture.onlyRegion();
+
+        // Cents, not a normalised 0..1 depth: the voice turns these into a
+        // semitone offset and a filter cutoff ratio respectively, so a 0.1
+        // normalised reading here would be a 100 cent error downstream.
+        REQUIRE (std::abs (region.modEnvToPitchCents - 1200.0f) < kTolerance);
+        REQUIRE (std::abs (region.modEnvToFilterCents + 2400.0f) < kTolerance);
+    }
+
+    SECTION ("an instrument with no modulation generators reads as no modulation")
+    {
+        Sf2Builder builder;
+        builder.presets     = { simplePreset() };
+        builder.instruments = { simpleInstrument ({}) };
+
+        const Fixture fixture { builder };
+        const auto& region = fixture.onlyRegion();
+
+        // The default has to be a true no-op. The voice uses these two values
+        // to decide whether to tick a second envelope at all, so a non-zero
+        // default would add work to every voice and shift every preset.
+        REQUIRE (std::abs (region.modEnvToPitchCents) < kTolerance);
+        REQUIRE (std::abs (region.modEnvToFilterCents) < kTolerance);
+    }
 }
 
 TEST_CASE ("root key, tuning and loop mode come through", "[sf2][flatten]")

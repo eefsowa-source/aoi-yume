@@ -155,6 +155,13 @@ bool SF2Loader::loadFile(const juce::File& file)
             }
             sample.loopEnabled = region.loopMode != x10::instrument::LoopMode::none;
             sample.volumeEnvelope = region.volumeEnvelope;
+            // The modulation envelope and its two depth generators. Both
+            // depths are in cents, and both are zero for a zone that states no
+            // modulation, which is what keeps the voice's second-envelope path
+            // inert for the majority of presets.
+            sample.modulationEnvelope = region.modulationEnvelope;
+            sample.modEnvToPitchCents  = region.modEnvToPitchCents;
+            sample.modEnvToFilterCents = region.modEnvToFilterCents;
             sample.attenuationDb = region.attenuationDb;
             sample.pan = region.pan;
             sample.exclusiveClass = region.exclusiveClass;

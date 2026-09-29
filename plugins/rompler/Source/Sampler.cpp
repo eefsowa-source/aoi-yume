@@ -15,6 +15,13 @@ namespace
     // vocal/string-style vibrato without sounding like a tremolo effect.
     constexpr float kVibratoRateHz = 5.5f;
 
+    // The zone modulation envelope sweeps the filter, so the cutoff has to be
+    // refreshed part way through a block rather than once per block. 16 samples
+    // is short enough that the sweep tracks the envelope, and long enough that
+    // the per-update cost (one tan plus a few divides, no allocation) stays
+    // negligible against the per-sample work that follows it.
+    constexpr int kModulationSubBlock = 16;
+
     // Lane layout for the synthetic stereo spread, indexed by voice slot.
     // Lane 0 stays in the centre, so the first voice of a fresh phrase (which
     // always takes the lowest idle slot) remains dual-mono. The remaining lanes
@@ -291,6 +298,21 @@ void Voice::detachSample() noexcept
         previousOwner->releaseVoiceSample();
 }
 
+void Voice::bindModulation (const Sample* sample) noexcept
+{
+    // Both depths are cents, and a depth of zero means "no modulation", so the
+    // envelope is only worth running when at least one of them is non-zero.
+    // Checking here rather than per sample keeps a preset with no modulation
+    // generators on exactly the code path it used before this existed.
+    modulationActive_ = sample->modEnvToPitchCents != 0.0f
+                     || sample->modEnvToFilterCents != 0.0f;
+
+    // A voice that has been modulated and then lands on an unmodulated zone
+    // must not keep running the old envelope, so the idle case resets too.
+    modulationEnvelope_.reset (modulationActive_ ? sample->modulationEnvelope
+                                                 : x10::instrument::Envelope {});
+}
+
 void Voice::start(const Sample* sample, int midiNote, float velocity,
                   const SF2Loader* sampleOwner) noexcept
 {
@@ -311,6 +333,7 @@ void Voice::start(const Sample* sample, int midiNote, float velocity,
                                                   ? sample->attenuationDb : 0.0f,
                                               0.0f, 144.0f) / 20.0f);
     volumeEnvelope_.reset (sample->volumeEnvelope);
+    bindModulation (sample);
     zoneReleaseMs_ = std::isfinite (sample->volumeEnvelope.releaseSeconds)
         ? std::max (0.0f, sample->volumeEnvelope.releaseSeconds * 1000.0f)
         : 0.0f;
@@ -358,6 +381,11 @@ void Voice::retarget(const Sample* sample, int midiNote, const SF2Loader* sample
                                                   ? sample->attenuationDb : 0.0f,
                                               0.0f, 144.0f) / 20.0f);
     volumeEnvelope_.setParameters (sample->volumeEnvelope);
+    // A legato move onto a different zone has to take that zone's modulation
+    // with it, whether it means starting the envelope fresh or dropping back to
+    // the unmodulated path. Restart rather than setParameters: a zone change is
+    // a new note as far as the modulation envelope is concerned.
+    bindModulation (sample);
     zoneReleaseMs_ = std::isfinite (sample->volumeEnvelope.releaseSeconds)
         ? std::max (0.0f, sample->volumeEnvelope.releaseSeconds * 1000.0f)
         : 0.0f;
@@ -431,6 +459,8 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
         adsr_.prepare (static_cast<double> (hostSampleRate));
     }
     volumeEnvelope_.prepare (hostSampleRate);
+    if (modulationActive_)
+        modulationEnvelope_.prepare (hostSampleRate);
 
     std::uint32_t filterOffsetBits = 0;
     static_assert (sizeof (filterOffsetBits) == sizeof (filterOffsetCents),
@@ -444,8 +474,8 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
         const float cutoffHz = std::clamp (
             sample_->filterCutoffHz * std::pow (2.0f, filterOffsetCents / 1200.0f),
             20.0f, static_cast<float> (hostSampleRate) * 0.49f);
-        const float q = std::pow (10.0f, sample_->filterResonanceDb / 20.0f) * 0.7071068f;
-        filter_.setCutoff (cutoffHz, q);
+        filterQ_ = std::pow (10.0f, sample_->filterResonanceDb / 20.0f) * 0.7071068f;
+        filter_.setCutoff (cutoffHz, filterQ_);
         filterParameterSample_ = sample_;
         filterParameterOffsetBits_ = filterOffsetBits;
         filterParametersCached_ = true;
@@ -555,6 +585,30 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
             break;
         }
 
+        // The zone modulation envelope drives pitch and filter. Its level is a
+        // 0..1 ramp, and the SoundFont depths say how far the voice is thrown
+        // at full level, so the modulation amount is the level times the depth.
+        // Tick it once per sample and reuse the value for both destinations so
+        // the two stay in lockstep.
+        const float modLevel = modulationActive_ ? modulationEnvelope_.tick() : 0.0f;
+
+        // Refresh the swept cutoff on a fixed sub-block cadence rather than
+        // per sample: one tan plus a few divides is cheap, but doing it 48000
+        // times a second per voice is not, and a smooth envelope does not need
+        // that resolution to read as a sweep. setCutoff recomputes only the
+        // coefficients and keeps the filter's delay line, so the cutoff glides
+        // without a discontinuity that a re-prepare would introduce.
+        if (modulationActive_ && sample_->modEnvToFilterCents != 0.0f
+            && (i % kModulationSubBlock) == 0)
+        {
+            const float sweptCents = filterOffsetCents
+                                   + modLevel * sample_->modEnvToFilterCents;
+            const float cutoffHz = std::clamp (
+                sample_->filterCutoffHz * std::pow (2.0f, sweptCents / 1200.0f),
+                20.0f, static_cast<float> (hostSampleRate) * 0.49f);
+            filter_.setCutoff (cutoffHz, filterQ_);
+        }
+
         // Pitch bend and vibrato are combined as an additional semitone
         // offset applied per sample, on top of the cached playRate_. This
         // keeps a live wheel/CC1 change instantaneous without recomputing or
@@ -567,6 +621,15 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
             vibratoSemitones =
                 (vibratoDepthCents * static_cast<float> (std::sin (vibratoPhase_))) / 100.0f;
             effectiveRate = fixedRate * std::exp2 (static_cast<double> (vibratoSemitones) / 12.0);
+        }
+
+        // The zone's own depth rides on top as an exponential, which keeps it
+        // out of the additive vibrato term so a modEnv sweep and CC1 vibrato
+        // scale each other the way a player would expect rather than fighting.
+        if (modulationActive_ && sample_->modEnvToPitchCents != 0.0f)
+        {
+            effectiveRate *= std::exp2 (
+                static_cast<double> (modLevel * sample_->modEnvToPitchCents) / 1200.0);
         }
 
         if (!looping)

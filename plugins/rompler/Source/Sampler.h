@@ -49,6 +49,13 @@ struct Sample
     // region data next to the decoded PCM lets the audio thread apply it using
     // only the Sample pointer it already owns.
     x10::instrument::Envelope volumeEnvelope {};
+    // The zone's modulation envelope and its two depth generators. Both depths
+    // are in cents and both default to zero, which is a true no-op: the voice
+    // checks them before ticking a second envelope at all, so a preset without
+    // modulation pays nothing and sounds exactly as it did before.
+    x10::instrument::Envelope modulationEnvelope {};
+    float modEnvToPitchCents  = 0.0f;
+    float modEnvToFilterCents = 0.0f;
     float attenuationDb = 0.0f;
     float pan = 0.0f;
     std::uint8_t exclusiveClass = 0;
@@ -227,6 +234,10 @@ private:
 
     x10::dsp::Adsr adsr_;
     VolumeEnvelope volumeEnvelope_;
+    /** The zone's modulation envelope, ticked only when the sample actually
+        states a depth. A preset with no modEnv generators leaves this idle and
+        costs one predictable branch per block. */
+    VolumeEnvelope modulationEnvelope_;
     Drive drive_;
     // Bit-pattern hash of the last pushed envelope parameter block; see render()
     // for why we must not re-push identical values every block.
@@ -259,9 +270,22 @@ private:
     const Sample* filterParameterSample_ = nullptr;
     std::uint32_t filterParameterOffsetBits_ = 0;
     bool filterParametersCached_ = false;
+    /** Latched at start()/retarget(): true when the bound sample states any
+        modEnv depth. Cached because the check gates a per-block envelope tick
+        and a per-sub-block filter update, and the sample is immutable while a
+        voice holds it. */
+    bool modulationActive_ = false;
+    /** Filter Q for the bound sample, kept so a modEnv sweep can change only
+        the cutoff without recomputing the resonance term every sub-block. */
+    float filterQ_ = 0.7071068f;
 
     void bindSample(const Sample* sample, const SF2Loader* sampleOwner) noexcept;
     void detachSample() noexcept;
+    /** Latches whether the newly bound sample needs its modulation envelope,
+        and (re)starts that envelope. Called from start() and retarget() so a
+        legato move onto a different zone cannot inherit the previous zone's
+        modulation state. */
+    void bindModulation (const Sample* sample) noexcept;
 };
 
 class VoicePool
