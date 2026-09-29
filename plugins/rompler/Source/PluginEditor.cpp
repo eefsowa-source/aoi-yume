@@ -2380,6 +2380,12 @@ RomplerEditor::RomplerEditor (RomplerProcessor& processorRef)
 {
     tooltipWindow_ = std::make_unique<juce::TooltipWindow> (this, 700);
 
+    // A child that wants keyboard focus is only walked by the Tab key when an
+    // ancestor is a keyboard focus container. Without this the knobs, switches
+    // and steppers never receive a key, so the whole keyboard layer is inert
+    // even though every control asks for focus.
+    setFocusContainerType (juce::Component::FocusContainerType::keyboardFocusContainer);
+
     // The script engraving painted in RomplerEditor::paint is the visible
     // brand; this label stays in the tree for accessibility only.
     addChildComponent (brandTitle_);
@@ -2524,6 +2530,12 @@ RomplerEditor::RomplerEditor (RomplerProcessor& processorRef)
     setKnobLabel (controls_[14], "REVERB ROOM");
     setKnobLabel (controls_[15], "REVERB DAMP");
     setKnobLabel (controls_[16], "REVERB MIX");
+    // These two sit at the end of the FX rail, so they were left without a
+    // panel legend and fell back to the long host-facing names. The faceplate
+    // already prints both names, so the drawn control had no caption and a
+    // screen reader announced "Ping-Pong Delay Mix" for the wrong position.
+    setKnobLabel (controls_[28], "PING-PONG FEEDBACK");
+    setKnobLabel (controls_[27], "DELAY MIX");
     setKnobLabel (controls_[17], "ATTACK");
     setKnobLabel (controls_[18], "DECAY");
     setKnobLabel (controls_[19], "SUSTAIN");

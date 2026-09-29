@@ -370,3 +370,31 @@ f4fabb638ab15bc8df3f592226a96c72bb37cb8bc2d66adb21d6fd67d70deee7  Standalone/Aoi
 
 미검증: auval은 설치된 AU가 2026-09-19 바이너리(`9af0d85c`)라 현재 빌드와 해시가
 달라 게이트 증거로 쓸 수 없다. 호스트 로딩과 청취는 사용자만 확인 가능하다.
+
+### UX-4 2단계 - 키보드 게이트와 패널 범례 수정 (2026-09-30)
+
+1단계는 각 컨트롤이 키를 받는다고 가정했다. 실제로는 에디터가 keyboard focus
+container가 아니어서, `setWantsKeyboardFocus(true)`를 호출한 32개 컨트롤이 전부 포커스
+트리에 등록되지 않았다. `grabKeyboardFocus`가 성공하지도 않아 링이 한 번도 안
+그려졌다. `setFocusContainerType(keyboardFocusContainer)`로 고쳤다.
+
+FX 레일 끝의 두 knob(27 DELAY MIX, 28 PING-PONG FEEDBACK)만 legend override가
+누락돼 있었다. faceplate는 이미 이름을 인쇄하고 있어서 화면에는 문제가 없었지만
+스크린리더는 호스트 측 긴 이름(`Ping-Pong Delay Mix`)을 읽었고, Tab 순서
+테스트가 두 이름을 찾지 못하고 실패했다.
+
+검증:
+
+- `the tab walk reaches every parameter control in signal order` - 컨트롤 focus
+  정지점 20개 초과, 컨테이너가 keyboard focus container인지, 그리고
+  `ComponentPeer::handleKeyPress`로 실제 키를 넣었을 때 파라미터가 움직이는지
+  확인한다. 컨테이너·traverser·keyPressed·attachment 전 경로가 이 한 번에 묶인다.
+- `a focused integer stepper moves by a whole step` - `AudioParameterInt`는
+  네 번째 인자가 기본값이라 interval이 0이다. Stepper의 1.0f fallback이
+  POLYPHONY를 키보드에서 살려준다.
+- `ui_shot <out.png> <w> <h> <focus-order>` - peer를 띄우고 focus를 준 뒤
+  캡처한다. 포커스 링은 paintOverChildren 전용이라 이 렌더로만 보인다.
+- `ctest --preset dev` 88/88, `ctest --preset plugin` 196/196,
+  `pluginval_vst3_strictness10` 통과(28.96초).
+
+미검증: 실제 DAW에서 Tab 키 이동과 스크린리더 음성 확인은 사용자만 가능하다.
