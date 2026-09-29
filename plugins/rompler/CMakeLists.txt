@@ -56,6 +56,8 @@ target_link_libraries(EONDS50
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags)
+target_link_libraries(EONDS50 PUBLIC "$<$<CONFIG:Debug>:melatonin_inspector>")
+target_compile_definitions(EONDS50 PUBLIC "$<$<CONFIG:Debug>:MELATONIN_INSPECTOR_ENABLED=1>")
 
 # Headless UI snapshot tool. Renders the real editor offscreen to a PNG so the
 # deck can be inspected without a host window (and without Screen Recording

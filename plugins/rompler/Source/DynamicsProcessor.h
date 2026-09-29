@@ -47,6 +47,7 @@ private:
     // decibels of reduction. The atomic mirror is read by the editor thread.
     float gainReductionDb_ = 0.0f;
     std::atomic<float> lastGainReductionDb_ { 0.0f };
+    float evenHarmonicDcCoefficient_ = 0.9995f;
     // Per-channel running mean of the squared signal used to remove the DC
     // component introduced by the asymmetric (even-harmonic) stage.
     std::vector<float> evenHarmonicDc_;

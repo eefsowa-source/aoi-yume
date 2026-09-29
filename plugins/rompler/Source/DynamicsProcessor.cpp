@@ -15,7 +15,8 @@ constexpr float kMaximumTimeMs = 10000.0f;
 constexpr float kMinimumMakeupDb = -60.0f;
 constexpr float kMaximumMakeupDb = 60.0f;
 constexpr float kEvenHarmonicAmount = 0.18f;
-constexpr float kEvenHarmonicDcCoefficient = 0.9995f;
+constexpr float kEvenHarmonicDcCoefficientAtReferenceRate = 0.9995f;
+constexpr double kEvenHarmonicDcReferenceSampleRate = 48000.0;
 
 float clampFinite (float value, float minimum, float maximum, float fallback) noexcept
 {
@@ -46,6 +47,9 @@ void DynamicsProcessor::prepare (double sampleRate, int maximumBlockSize, int nu
     static_cast<void> (maximumBlockSize);
 
     sampleRate_ = std::isfinite (sampleRate) && sampleRate > 0.0 ? sampleRate : 44100.0;
+    evenHarmonicDcCoefficient_ = static_cast<float> (std::pow (
+        static_cast<double> (kEvenHarmonicDcCoefficientAtReferenceRate),
+        kEvenHarmonicDcReferenceSampleRate / sampleRate_));
     preparedChannels_ = juce::jmax (0, numChannels);
     evenHarmonicDc_.assign (static_cast<std::size_t> (preparedChannels_), 0.0f);
     prepared_ = true;
@@ -134,8 +138,8 @@ void DynamicsProcessor::process (juce::AudioBuffer<float>& buffer,
 
             const float squared = compressed * compressed;
             auto& dc = evenHarmonicDc_[static_cast<std::size_t> (channel)];
-            dc = kEvenHarmonicDcCoefficient * dc
-                + (1.0f - kEvenHarmonicDcCoefficient) * squared;
+            dc = evenHarmonicDcCoefficient_ * dc
+                + (1.0f - evenHarmonicDcCoefficient_) * squared;
             return compressed + harmonicAmount * (squared - dc);
         };
 

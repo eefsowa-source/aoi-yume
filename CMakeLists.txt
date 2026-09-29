@@ -55,5 +55,16 @@ if(X10_BUILD_PLUGINS)
         GIT_SHALLOW    TRUE)
     FetchContent_MakeAvailable(JUCE)
 
+    FetchContent_Declare(melatonin_inspector
+        GIT_REPOSITORY https://github.com/sudara/melatonin_inspector.git
+        GIT_TAG 9c483f865854d83fe9873e1c20e3fd772f695f80
+        # melatonin's CMakeLists assumes its source dir is literally named
+        # "melatonin_inspector" (juce_add_module derives the module name from
+        # the directory). The FetchContent default <name>-src path breaks that,
+        # so pin the checkout directory name.
+        SOURCE_DIR "${FETCHCONTENT_BASE_DIR}/melatonin_inspector"
+        GIT_SHALLOW FALSE)
+    FetchContent_MakeAvailable(melatonin_inspector)
+
     add_subdirectory(plugins/rompler)
 endif()
