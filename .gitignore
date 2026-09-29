@@ -19,10 +19,9 @@ compile_commands.json
 testdata/
 
 # Offscreen UI render + tuning-session scratch under outputs/ (the layout
-# analysis scripts themselves are committed).
-outputs/*.png
-outputs/cli/
-outputs/Icon?
+# analysis scripts themselves are committed). The renders land in
+# subdirectories, so ignore the whole tree rather than just the top level.
+outputs/
 
 # macOS custom-folder-icon marker files. Harmless on their own, but when a
 # JUCE plugin target copies a resource tree that contains one, codesign
