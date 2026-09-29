@@ -4,6 +4,7 @@
 #include "SF2Loader.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <vector>
 
@@ -15,6 +16,31 @@ constexpr int    kBlockSize  = 512;
 juce::File testSf2File()
 {
     return juce::File (X10_SF2_CROSSCHECK_TESTDATA "/Dr._Mario_64_Soundfont.sf2");
+}
+
+/**
+    The pinned crosscheck fixture resolves one zone per note, so layering needs a
+    bank that actually stacks zones. These small corpus banks do; the first one
+    present is used.
+*/
+juce::File layeredTestBank()
+{
+    const juce::StringArray candidates {
+        "Voice_Erhu.sf2",
+        "Super_Nintendo_Unofficial_update.sf2",
+        "Hot_Breather_HQ.sf2",
+        "Korg_X5DR_PCM__PCM98__Soundfont_V2.0.sf2"
+    };
+
+    const juce::File corpus (X10_SF2_CROSSCHECK_TESTDATA);
+    for (const auto& name : candidates)
+    {
+        const juce::File candidate (corpus.getChildFile (name));
+        if (candidate.existsAsFile())
+            return candidate;
+    }
+
+    return {};
 }
 } // namespace
 
@@ -31,6 +57,84 @@ TEST_CASE ("SF2Loader loads a real bank and resolves a sample for note-on", "[sf
     const aod::Sample* sample = loader.getSample (bank, program, 60, 100);
     REQUIRE (sample != nullptr);
     REQUIRE (! sample->data.empty());
+}
+
+TEST_CASE ("overlapping zones of a real bank are all exposed for one note", "[sf2][m1][layers]")
+{
+    const juce::File layeredFile = layeredTestBank();
+    if (! layeredFile.existsAsFile())
+        SKIP ("no layered test bank present on this machine");
+
+    aod::SF2Loader loader (static_cast<int> (kSampleRate));
+    REQUIRE (loader.loadFile (layeredFile));
+
+    // Velocity splits and stereo pairs are ordinary SoundFont structure, and the
+    // engine used to sound only the first match. Scan the whole bank once for
+    // the widest stack and for a note whose zones span both sides of the image.
+    std::array<const aod::Sample*, aod::SF2Loader::maxMatchingSamples> layers {};
+    std::size_t widestStack = 0;
+    bool foundStereoPair = false;
+    int pairBank = 0;
+    int pairProgram = 0;
+    int pairKey = 0;
+    int pairVelocity = 0;
+
+    for (int preset = 0; preset < loader.presetCount(); ++preset)
+    {
+        const auto [bank, program] = loader.presetBankProgram (preset);
+        for (const int velocity : { 64, 100, 127 })
+            for (int key = 0; key < 128; ++key)
+            {
+                const auto count = loader.getSamples (bank, program, key, velocity, layers);
+                widestStack = std::max (widestStack, count);
+
+                float lowestPan = 0.0f;
+                float highestPan = 0.0f;
+                for (std::size_t index = 0; index < count; ++index)
+                {
+                    lowestPan = std::min (lowestPan, layers[index]->pan);
+                    highestPan = std::max (highestPan, layers[index]->pan);
+                }
+
+                if (! foundStereoPair && count >= 2 && lowestPan < 0.0f && highestPan > 0.0f)
+                {
+                    foundStereoPair = true;
+                    pairBank = bank;
+                    pairProgram = program;
+                    pairKey = key;
+                    pairVelocity = velocity;
+                }
+            }
+    }
+
+    REQUIRE (widestStack >= 2);
+    REQUIRE (foundStereoPair);
+
+    // Asking again for the stereo note must be stable, and the pool must never
+    // be handed the same decoded sample twice.
+    const auto resolved = loader.getSamples (pairBank, pairProgram, pairKey, pairVelocity, layers);
+    REQUIRE (resolved >= 2);
+    REQUIRE (resolved <= layers.size());
+
+    float lowestPan = 0.0f;
+    float highestPan = 0.0f;
+    for (std::size_t index = 0; index < resolved; ++index)
+    {
+        REQUIRE (layers[index] != nullptr);
+        // The SoundFont pan and attenuation generators must survive the loader.
+        REQUIRE (layers[index]->pan >= -1.0f);
+        REQUIRE (layers[index]->pan <= 1.0f);
+        REQUIRE (layers[index]->attenuationDb >= 0.0f);
+        REQUIRE (layers[index]->attenuationDb <= 144.0f);
+        lowestPan = std::min (lowestPan, layers[index]->pan);
+        highestPan = std::max (highestPan, layers[index]->pan);
+
+        for (std::size_t other = index + 1; other < resolved; ++other)
+            REQUIRE (layers[index] != layers[other]);
+    }
+
+    REQUIRE (lowestPan < 0.0f);
+    REQUIRE (highestPan > 0.0f);
 }
 
 TEST_CASE ("a note-on through the processor produces non-silent output", "[sf2][m1]")
@@ -67,6 +171,61 @@ TEST_CASE ("a note-on through the processor produces non-silent output", "[sf2][
         peak = std::max (peak, buffer.getMagnitude (ch, 0, kBlockSize));
 
     REQUIRE (peak > 0.0f);
+}
+
+TEST_CASE ("the processor publishes its sounding notes for the keybed", "[sf2][m1][ui]")
+{
+    if (! testSf2File().existsAsFile())
+        SKIP ("test SF2 corpus not present on this machine");
+
+    aod::RomplerProcessor processor;
+    processor.setPlayConfigDetails (0, 2, kSampleRate, kBlockSize);
+    processor.prepareToPlay (kSampleRate, kBlockSize);
+    processor.loadSoundFont (testSf2File());
+
+    aod::SF2Loader loader (static_cast<int> (kSampleRate));
+    REQUIRE (loader.loadFile (testSf2File()));
+    const auto [bank, program] = loader.firstPresetProgram();
+
+    int soundingKey = -1;
+    for (int key = 0; key < 128 && soundingKey < 0; ++key)
+        if (loader.getSample (bank, program, key, 100) != nullptr)
+            soundingKey = key;
+    REQUIRE (soundingKey >= 0);
+    processor.selectPreset (bank, program);
+
+    const auto isActive = [&processor] (int note)
+    {
+        std::uint64_t lo = 0;
+        std::uint64_t hi = 0;
+        processor.getActiveNotes (lo, hi);
+        const auto bit = std::uint64_t { 1 } << static_cast<unsigned> (note % 64);
+        return note < 64 ? (lo & bit) != 0 : (hi & bit) != 0;
+    };
+
+    juce::AudioBuffer<float> buffer (2, kBlockSize);
+    juce::MidiBuffer midi;
+    midi.addEvent (juce::MidiMessage::noteOn (1, soundingKey, static_cast<juce::uint8> (100)), 0);
+    processor.processBlock (buffer, midi);
+
+    REQUIRE (isActive (soundingKey));
+
+    // The editor keeps a note lit for the whole release tail, so it must stay
+    // set while the voice is still fading and clear once the tail has run out.
+    midi.clear();
+    midi.addEvent (juce::MidiMessage::noteOff (1, soundingKey), 0);
+    buffer.clear();
+    processor.processBlock (buffer, midi);
+    REQUIRE (isActive (soundingKey));
+
+    for (int block = 0; block < 64; ++block)
+    {
+        buffer.clear();
+        juce::MidiBuffer empty;
+        processor.processBlock (buffer, empty);
+    }
+
+    REQUIRE_FALSE (isActive (soundingKey));
 }
 
 TEST_CASE ("the processor emits a spread stereo chord", "[sf2][m1][stereo]")

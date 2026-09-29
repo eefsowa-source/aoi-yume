@@ -249,6 +249,20 @@ Knob::Knob (juce::RangedAudioParameter& param, bool hot)
     slider_.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
     attachment_ = std::make_unique<juce::SliderParameterAttachment> (param, slider_);
 
+    // A host reads the unit from getLabel() and prints it itself; the parameter's
+    // own text is only the number, so the on-screen readout has to append the
+    // unit or "-3.00" would be indistinguishable from "-3.00 Hz".
+    const auto unit = juce::String (param.getLabel());
+    if (unit.isNotEmpty())
+    {
+        slider_.textFromValueFunction = [&param, unit] (double value)
+        {
+            return param.getText (param.convertTo0to1 (static_cast<float> (value)), 0) + unit;
+        };
+    }
+
+    setTooltip (param.getName (64) + ": drag to adjust, Shift+drag or Shift+wheel for fine steps, double-click to reset");
+
     // The slider is not a visible child (we draw the knob ourselves), so value
     // changes that arrive through the attachment never repaint us. Registering
     // as a parameter listener makes the pointer and value print track the
@@ -340,6 +354,11 @@ void Knob::setReadoutVisible (bool shouldBeVisible)
         value_.setVisible (shouldBeVisible);
     }
     repaint();
+}
+
+juce::String Knob::readoutText()
+{
+    return slider_.getTextFromValue (slider_.getValue());
 }
 
 void Knob::paint (juce::Graphics& g)
@@ -596,6 +615,20 @@ void Knob::mouseDown (const juce::MouseEvent& e)
     setMouseCursor (juce::MouseCursor::IBeamCursor);
 }
 
+void Knob::mouseDoubleClick (const juce::MouseEvent&)
+{
+    // Hardware-style reset: the APVTS default in denormalised units. Routing
+    // through the attachment keeps host automation, undo state and the
+    // transient readout identical to a manual adjustment.
+    const auto& range = param_.getNormalisableRange();
+    const float defaultValue = range.convertFrom0to1 (param_.getDefaultValue());
+    slider_.setValue (defaultValue, juce::sendNotificationSync);
+    setReadoutVisible (true);
+    startTimer (650);
+    refreshInitState();
+    repaint();
+}
+
 void Knob::mouseUp (const juce::MouseEvent&)
 {
     pressed_ = false;
@@ -613,18 +646,35 @@ void Knob::mouseDrag (const juce::MouseEvent& e)
     // move it visibly.
     const auto range = param_.getNormalisableRange();
     const float pixelsPerFullRange = 200.0f;
-    const float delta = (lastDragY_ - e.y) * (range.end - range.start) / pixelsPerFullRange;
+    float delta = (lastDragY_ - e.y) * (range.end - range.start) / pixelsPerFullRange;
+    if (e.mods.isShiftDown())
+        delta *= 0.1f;
     lastDragY_ = e.y;
     slider_.setValue (slider_.getValue() + delta, juce::sendNotificationSync);
 }
 
-void Knob::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& wheel)
+void Knob::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
 {
+    const auto range = param_.getNormalisableRange();
+    const float span = range.end - range.start;
+    if (! (span > 0.0f) || wheel.deltaY == 0.0f)
+        return;
+
     setReadoutVisible (true);
     startTimer (650);
-    const auto range = param_.getNormalisableRange();
-    const float step = (range.end - range.start) / 100.0f;
-    slider_.setValue (slider_.getValue() + (float) wheel.deltaY * step, juce::sendNotificationSync);
+
+    // Same convention as juce::Slider itself: a full wheel notch moves 0.15 of
+    // the range, but never less than the parameter's own interval. The interval
+    // alone is only a rounding resolution here (0.01 over a 0..100 range), which
+    // as a wheel step would be inaudible, while a trackpad's small deltas still
+    // need the floor to move at all. Shift trades speed for precision, as in the
+    // drag path.
+    const float delta = wheel.deltaY * (wheel.isReversed ? -1.0f : 1.0f) * 0.15f * span;
+    float step = std::max (range.interval, std::abs (delta));
+    if (e.mods.isShiftDown())
+        step *= 0.1f;
+
+    slider_.setValue (slider_.getValue() + (delta < 0.0f ? -step : step), juce::sendNotificationSync);
 }
 
 // ============================================================================
@@ -644,6 +694,8 @@ Switch::Switch (juce::AudioParameterChoice& param, const juce::String& label, bo
         box_.addItem (choice, box_.getNumItems() + 1);
     attachment_ = std::make_unique<juce::ComboBoxParameterAttachment> (param, box_);
 
+    setTooltip ((label.isEmpty() ? param.getName (64) : juce::String (label))
+                + ": click or drag to cycle choices, Alt-click or right-click for the previous one");
     setSize (110, 64);
 }
 
@@ -660,13 +712,15 @@ void Switch::resized()
     label_.setBounds (getLocalBounds().withSizeKeepingCentre (w, 14).withY (pill_.getBottom() + (leds_ ? 22 : 4)));
 }
 
-void Switch::advanceChoice()
+void Switch::advanceChoice (int direction)
 {
     const int n = box_.getNumItems();
-    if (n <= 1)
+    if (n <= 1 || direction == 0)
         return;
-    const int cur = box_.getSelectedId();
-    box_.setSelectedId (cur >= n ? 1 : cur + 1, juce::sendNotificationSync);
+
+    const int cur = juce::jlimit (1, n, box_.getSelectedId());
+    const int next = ((cur - 1 + (direction > 0 ? 1 : -1) + n) % n) + 1;
+    box_.setSelectedId (next, juce::sendNotificationSync);
     repaint();
 }
 
@@ -802,6 +856,7 @@ void Switch::paint (juce::Graphics& g)
 
 void Switch::mouseDown (const juce::MouseEvent& e)
 {
+    steppedByDrag_ = false;
     lastDragY_ = e.y;
     setMouseCursor (juce::MouseCursor::IBeamCursor);
 }
@@ -809,8 +864,13 @@ void Switch::mouseDown (const juce::MouseEvent& e)
 void Switch::mouseUp (const juce::MouseEvent& e)
 {
     setMouseCursor (juce::MouseCursor::NormalCursor);
-    if (std::abs (lastDragY_ - e.y) < 5.0f)
-        advanceChoice();
+    // A drag has already stepped the choice, so a release only steps when the
+    // press turned out to be a click. Deliberately not using mouseWasClicked():
+    // it also calls a long press a drag, and a held switch should still change
+    // on release. Alt/right-click steps backwards, which lets the switch be
+    // reversed without cycling all the way round.
+    if (! steppedByDrag_)
+        advanceChoice ((e.mods.isAltDown() || e.mods.isPopupMenu()) ? -1 : 1);
 }
 
 void Switch::mouseDrag (const juce::MouseEvent& e)
@@ -819,21 +879,17 @@ void Switch::mouseDrag (const juce::MouseEvent& e)
     if (std::abs (dy) > 24.0f)
     {
         lastDragY_ = e.y;
-        advanceChoice();
+        steppedByDrag_ = true;
+        advanceChoice (e.mods.isAltDown() ? -1 : 1);
     }
 }
 
 void Switch::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& wheel)
 {
     if (wheel.deltaY > 0)
-    {
-        const int n = box_.getNumItems();
-        const int cur = box_.getSelectedId();
-        box_.setSelectedId (cur <= 1 ? n : cur - 1, juce::sendNotificationSync);
-    }
+        advanceChoice (-1);
     else if (wheel.deltaY < 0)
         advanceChoice();
-    repaint();
 }
 
 // ============================================================================
@@ -852,6 +908,9 @@ Toggle::Toggle (juce::AudioParameterChoice& param, const juce::String& label)
     for (const auto& choice : param.getAllValueStrings())
         box_.addItem (choice, box_.getNumItems() + 1);
     attachment_ = std::make_unique<juce::ComboBoxParameterAttachment> (param, box_);
+
+    setTooltip ((label.isEmpty() ? param.getName (64) : juce::String (label))
+                + ": click to toggle");
 
     setSize (110, 64);
 }
@@ -1178,6 +1237,8 @@ Stepper::Stepper (juce::RangedAudioParameter& param, const juce::String& label)
     // on their own, so listen to the parameter directly.
     param_.addListener (this);
 
+    setTooltip ((label.isEmpty() ? param.getName (64) : juce::String (label))
+                + ": drag or scroll to step the value");
     setSize (110, 64);
 }
 
@@ -1274,27 +1335,51 @@ void Stepper::mouseDrag (const juce::MouseEvent& e)
     // 60 pixels.
     const auto range = param_.getNormalisableRange();
     const float pixelsPerFullRange = 200.0f;
-    const float delta = (lastDragY_ - e.y) * (range.end - range.start) / pixelsPerFullRange;
+    float delta = (lastDragY_ - e.y) * (range.end - range.start) / pixelsPerFullRange;
+    if (e.mods.isShiftDown())
+        delta *= 0.1f;
     lastDragY_ = e.y;
     slider_.setValue (slider_.getValue() + delta, juce::sendNotificationSync);
 }
 
 void Stepper::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& wheel)
 {
-    slider_.setValue (slider_.getValue() + (float) wheel.deltaY, juce::sendNotificationSync);
+    // One notch is one authored step. A smooth wheel reports about 0.1 per
+    // notch, which an integer parameter would round away entirely.
+    const auto range = param_.getNormalisableRange();
+    const float interval = range.interval > 0.0f ? range.interval : 1.0f;
+    const float direction = wheel.deltaY > 0.0f ? 1.0f : (wheel.deltaY < 0.0f ? -1.0f : 0.0f);
+    if (direction == 0.0f)
+        return;
+
+    slider_.setValue (slider_.getValue() + direction * interval, juce::sendNotificationSync);
 }
 
 // ============================================================================
 // PeakMeter
 // ============================================================================
 
-PeakMeter::PeakMeter() = default;
+PeakMeter::PeakMeter()
+{
+    setTooltip ("Output peak: the top segment latches red when the safety ceiling engages; click to reset");
+}
 PeakMeter::~PeakMeter() = default;
 
 void PeakMeter::setLevel (float level)
 {
     level_ = juce::jlimit (0.0f, 1.0f, level);
+    if (level_ >= clipThreshold)
+        clipped_ = true;
     repaint();
+}
+
+void PeakMeter::mouseDown (const juce::MouseEvent&)
+{
+    if (clipped_)
+    {
+        clipped_ = false;
+        repaint();
+    }
 }
 
 void PeakMeter::paint (juce::Graphics& g)
@@ -1314,6 +1399,14 @@ void PeakMeter::paint (juce::Graphics& g)
                 const auto colour = (i >= numSegments - 1) ? theme::ledRed
                                   : (i >= numSegments - 3) ? theme::ledHot
                                                            : theme::ledMint;
+                g.setColour (colour.withAlpha (0.85f));
+                g.fillRoundedRectangle (r, 1.4f);
+            }
+            else if (i == numSegments - 1 && clipped_)
+            {
+                // Latched clip segment stays lit until clicked, so a transient
+                // over is still visible after the peak has fallen.
+                const auto colour = theme::ledRed;
                 g.setColour (colour.withAlpha (0.85f));
                 g.fillRoundedRectangle (r, 1.4f);
             }
@@ -1341,7 +1434,7 @@ void PeakMeter::paint (juce::Graphics& g)
     for (int i = 0; i < numSegments; ++i)
     {
         auto r = juce::Rectangle<float> (inner.getX() + i * (ledW + gap), inner.getY(), ledW, h);
-        const bool on = i < lit;
+        const bool on = i < lit || (i == numSegments - 1 && clipped_);
         const auto colour = (i >= numSegments - 1) ? theme::ledRed
                           : (i >= numSegments - 3) ? theme::ledHot
                                                    : theme::ledMint;
@@ -1363,13 +1456,38 @@ void PeakMeter::paint (juce::Graphics& g)
 // GainReductionMeter
 // ============================================================================
 
-GainReductionMeter::GainReductionMeter() = default;
+GainReductionMeter::GainReductionMeter()
+{
+    setTooltip ("Compressor gain reduction with a slow-falling peak hold; click to clear the hold");
+}
 GainReductionMeter::~GainReductionMeter() = default;
 
 void GainReductionMeter::setReductionDb (float reductionDb)
 {
     reductionDb_ = juce::jlimit (0.0f, 24.0f, reductionDb);
+    // The hold marker jumps to a new maximum and then falls at a fixed rate per
+    // UI update, so a short transient stays readable after the needle drops.
+    peakHoldDb_ = juce::jlimit (reductionDb_, 24.0f, peakHoldDb_ - holdFallDb);
     repaint();
+}
+
+void GainReductionMeter::mouseDown (const juce::MouseEvent&)
+{
+    if (peakHoldDb_ > 0.0f)
+    {
+        peakHoldDb_ = reductionDb_;
+        repaint();
+    }
+}
+
+int GainReductionMeter::holdSegmentFor (int lit) const noexcept
+{
+    if (peakHoldDb_ <= 0.0f)
+        return -1;
+
+    const int hold = juce::jlimit (0, numSegments - 1,
+                                   juce::roundToInt ((peakHoldDb_ / 24.0f) * (float) numSegments) - 1);
+    return hold >= lit ? hold : -1;
 }
 
 void GainReductionMeter::paint (juce::Graphics& g)
@@ -1381,6 +1499,7 @@ void GainReductionMeter::paint (juce::Graphics& g)
         const float ledWidth = (ledArea.getWidth() - gap * (numSegments - 1)) / (float) numSegments;
         const int lit = juce::jlimit (0, numSegments,
                                       juce::roundToInt ((reductionDb_ / 24.0f) * (float) numSegments));
+        const int hold = holdSegmentFor (lit);
         for (int i = 0; i < numSegments; ++i)
         {
             const auto segment = juce::Rectangle<float> (ledArea.getX() + i * (ledWidth + gap),
@@ -1392,6 +1511,13 @@ void GainReductionMeter::paint (juce::Graphics& g)
                                                           : theme::ledMint;
                 g.setColour (colour.withAlpha (0.85f));
                 g.fillRoundedRectangle (segment, 1.2f);
+            }
+            else if (i == hold)
+            {
+                // Peak-hold marker: a thin bar where the reduction peaked, so
+                // it stays readable after the live level has fallen away.
+                g.setColour (theme::ledRed.withAlpha (0.80f));
+                g.fillRoundedRectangle (segment.withSizeKeepingCentre (2.0f, segment.getHeight()), 0.8f);
             }
         }
         return;
@@ -1413,6 +1539,7 @@ void GainReductionMeter::paint (juce::Graphics& g)
     const float ledWidth = (ledArea.getWidth() - gap * (float) (numSegments - 1)) / (float) numSegments;
     const int lit = juce::jlimit (0, numSegments,
                                   juce::roundToInt ((reductionDb_ / 24.0f) * (float) numSegments));
+    const int hold = holdSegmentFor (lit);
 
     g.setColour (theme::inkSoft.withAlpha (0.86f));
     g.setFont (makeDisplayFont (8.8f, true));
@@ -1437,6 +1564,11 @@ void GainReductionMeter::paint (juce::Graphics& g)
             g.fillRoundedRectangle (segment.reduced (0.55f, 0.8f), 0.9f);
             g.setColour (colour.withAlpha (0.26f));
             g.drawRoundedRectangle (segment.expanded (0.5f), 1.8f, 0.8f);
+        }
+        else if (i == hold)
+        {
+            g.setColour (theme::ledRed.withAlpha (0.80f));
+            g.fillRoundedRectangle (segment.withSizeKeepingCentre (2.0f, segment.getHeight() - 1.0f), 0.8f);
         }
     }
 }
@@ -1507,6 +1639,15 @@ void Keyboard::setNoteOn (int note, bool on)
 {
     lit_.set (note, on);
     repaint();
+}
+
+bool Keyboard::isNoteLit (int note) const
+{
+    for (auto it = lit_.begin(); it != lit_.end(); ++it)
+        if (it.getKey() == note)
+            return it.getValue();
+
+    return false;
 }
 
 void Keyboard::paint (juce::Graphics& g)
@@ -2027,6 +2168,8 @@ RomplerEditor::RomplerEditor (RomplerProcessor& processorRef)
       envBox_ ("ENVELOPE"),
       fxBox_ ("FX")
 {
+    tooltipWindow_ = std::make_unique<juce::TooltipWindow> (this, 700);
+
     // The script engraving painted in RomplerEditor::paint is the visible
     // brand; this label stays in the tree for accessibility only.
     addChildComponent (brandTitle_);
@@ -2881,6 +3024,32 @@ void RomplerEditor::timerCallback()
         pitchWheel_->setValue (processor_.getPitchWheelNormalized());
     if (modWheel_)
         modWheel_->setValue (processor_.getModWheelNormalized());
+
+    // Mirror sounding notes - from the keybed itself or host/live MIDI - onto
+    // the keyboard. Only changed bits repaint, and a note stays lit for the
+    // whole release tail since the mask counts active voices, not held keys.
+    std::uint64_t lo = 0;
+    std::uint64_t hi = 0;
+    processor_.getActiveNotes (lo, hi);
+    const std::uint64_t loChanged = lo ^ uiNotesLo_;
+    const std::uint64_t hiChanged = hi ^ uiNotesHi_;
+    if ((loChanged | hiChanged) != 0)
+    {
+        for (int note = 0; note < 64; ++note)
+        {
+            const auto bit = std::uint64_t { 1 } << static_cast<unsigned> (note);
+            if ((loChanged & bit) != 0)
+                keyboard_.setNoteOn (note, (lo & bit) != 0);
+        }
+        for (int note = 64; note < 128; ++note)
+        {
+            const auto bit = std::uint64_t { 1 } << static_cast<unsigned> (note - 64);
+            if ((hiChanged & bit) != 0)
+                keyboard_.setNoteOn (note, (hi & bit) != 0);
+        }
+        uiNotesLo_ = lo;
+        uiNotesHi_ = hi;
+    }
 
     if (hasActivePreset_)
     {

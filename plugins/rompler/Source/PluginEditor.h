@@ -11,6 +11,10 @@
 #include "Parameters.h"
 #include "PresetBrowserOverlay.h"
 
+#if defined(MELATONIN_INSPECTOR_ENABLED)
+#include <melatonin_inspector/melatonin_inspector.h>
+#endif
+
 namespace aod
 {
 
@@ -166,6 +170,7 @@ private:
     while it is being adjusted.
 */
 class Knob final : public juce::Component,
+                   public juce::SettableTooltipClient,
                    private juce::AudioProcessorParameter::Listener,
                    private juce::AsyncUpdater,
                    private juce::Timer
@@ -191,9 +196,13 @@ public:
     void resized() override;
 
     void mouseDown (const juce::MouseEvent&) override;
+    void mouseDoubleClick (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
+
+    /** The transient readout string, including the parameter's unit label. */
+    [[nodiscard]] juce::String readoutText();
 
     /** Called (synchronously, possibly from the audio thread) when the bound
         parameter's value changes from any source - drag, wheel, host
@@ -229,7 +238,8 @@ private:
     and OVERSAMPLE switches in the mockup. Drives an AudioParameterChoice via
     a ComboBoxParameterAttachment backed by a hidden combo box.
 */
-class Switch final : public juce::Component
+class Switch final : public juce::Component,
+                     public juce::SettableTooltipClient
 {
 public:
     explicit Switch (juce::AudioParameterChoice& param, const juce::String& label = {}, bool leds = false);
@@ -249,7 +259,8 @@ public:
     void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
 
 private:
-    void advanceChoice();
+    /** Moves the choice by @p direction, wrapping; negative steps backwards. */
+    void advanceChoice (int direction = 1);
     void paintSkin (juce::Graphics&);
 
     [[maybe_unused]] juce::AudioParameterChoice& param_;
@@ -258,6 +269,9 @@ private:
     std::unique_ptr<juce::ComboBoxParameterAttachment> attachment_;
     juce::Rectangle<int> pill_;
     float lastDragY_ = 0.0f;
+    /// Set when a drag already stepped the choice, so the release is not
+    /// counted as a second click.
+    bool steppedByDrag_ = false;
     bool leds_ = false;
     bool skinMode_ = false;
 
@@ -268,7 +282,8 @@ private:
     A 2-way toggle switch, like the FILTER ROUTE Pre/Post switch in the
     mockup. Drives an AudioParameterChoice with exactly two choices.
 */
-class Toggle final : public juce::Component
+class Toggle final : public juce::Component,
+                     public juce::SettableTooltipClient
 {
 public:
     explicit Toggle (juce::AudioParameterChoice& param, const juce::String& label = {});
@@ -377,6 +392,7 @@ private:
     SliderParameterAttachment backed by a hidden slider.
 */
 class Stepper final : public juce::Component,
+                      public juce::SettableTooltipClient,
                       private juce::AudioProcessorParameter::Listener,
                       private juce::AsyncUpdater
 {
@@ -417,44 +433,64 @@ private:
 };
 
 /** A column of LED segments that light up with the output peak level. */
-class PeakMeter final : public juce::Component
+class PeakMeter final : public juce::Component,
+                        public juce::SettableTooltipClient
 {
 public:
     PeakMeter();
     ~PeakMeter() override;
 
     void setLevel (float level);   // 0..1
+    /** True while the clip segment is latched. Exposed for the UI tests. */
+    [[nodiscard]] bool isClipped() const noexcept { return clipped_; }
 
     /** In skin mode only the lit segments draw over the painted meter strip. */
     void setSkinMode (bool on) { skinMode_ = on; repaint(); }
 
     void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
 
 private:
     static constexpr int numSegments = 8;
+    /// Segments at or above this level count as the safety ceiling engaging
+    /// (the ceiling shaper saturates at 0.985, so 0.98 is just under it).
+    static constexpr float clipThreshold = 0.98f;
     float level_ = 0.0f;
+    bool clipped_ = false;
     bool skinMode_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PeakMeter)
 };
 
-/** Read-only horizontal LED meter for compressor gain reduction in dB. */
-class GainReductionMeter final : public juce::Component
+/** Read-only horizontal LED meter for compressor gain reduction in dB, with a
+    slow-falling peak hold that a click clears. */
+class GainReductionMeter final : public juce::Component,
+                                 public juce::SettableTooltipClient
 {
 public:
     GainReductionMeter();
     ~GainReductionMeter() override;
 
     void setReductionDb (float reductionDb);
+    /** Largest reduction on the hold marker, in dB. Exposed for the UI tests. */
+    [[nodiscard]] float peakHoldDb() const noexcept { return peakHoldDb_; }
 
     /** In skin mode only the lit segments draw over the painted GR strip. */
     void setSkinMode (bool on) { skinMode_ = on; repaint(); }
 
     void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
 
 private:
     static constexpr int numSegments = 6;
+    /** Segment index the hold marker sits on, or -1 when the live level is
+        already at least as high. @p lit is the live lit-segment count. */
+    [[nodiscard]] int holdSegmentFor (int lit) const noexcept;
+    /// Per-update fall of the hold marker. The meter is pushed once per UI
+    /// tick, so this is a fixed rate rather than a wall-clock decay.
+    static constexpr float holdFallDb = 0.9f;
     float reductionDb_ = 0.0f;
+    float peakHoldDb_ = 0.0f;
     bool skinMode_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GainReductionMeter)
@@ -481,6 +517,8 @@ public:
 
     void setKeyRange (int lowNote, int numKeys);
     void setNoteOn (int note, bool on);
+    /** True while @p note is drawn as sounding (keybed press or MIDI mirror). */
+    [[nodiscard]] bool isNoteLit (int note) const;
     void setNoteCallback (std::function<void (int, bool)> cb) { noteCallback_ = std::move (cb); }
     int findNote (juce::Point<float>) const;
 
@@ -664,6 +702,15 @@ private:
     bool hasActivePreset_ = false;
     bool presetDirty_ = false;
 
+    // Last published sounding-note mask; the timer diffs it against the
+    // processor's snapshot so only changed keys repaint.
+    std::uint64_t uiNotesLo_ = 0;
+    std::uint64_t uiNotesHi_ = 0;
+
+    // Hosts every child control's setTooltip() text. Owned by the editor so
+    // the window dies before the components it observes.
+    std::unique_ptr<juce::TooltipWindow> tooltipWindow_;
+
     void refreshDisplay();
     void refreshPresetHeader();
     void refreshPresetList();
@@ -680,6 +727,10 @@ private:
 
     void comboBoxChanged (juce::ComboBox*) override;
     void timerCallback() override;
+
+#if defined(MELATONIN_INSPECTOR_ENABLED)
+    melatonin::Inspector inspector { *this, false };
+#endif
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RomplerEditor)
 };

@@ -1,7 +1,9 @@
 #include "PluginProcessor.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
+#include <span>
 #include "PluginEditor.h"
 
 #include <juce_core/juce_core.h>
@@ -210,20 +212,21 @@ void RomplerProcessor::dispatchUiNote (const UiNoteEvent& event, const SF2Loader
     {
         const int bank = currentBank_.load (std::memory_order_relaxed);
         const int program = currentProgram_.load (std::memory_order_relaxed);
-        if (const Sample* sample = loader.getSample (bank, program, event.note, event.velocity))
+        std::array<const Sample*, SF2Loader::maxMatchingSamples> samples {};
+        const auto resolved = loader.getSamples (bank, program, event.note, event.velocity, samples);
+        const auto layerCount = std::min (resolved, samples.size());
+        if (layerCount != 0)
         {
-            voicePool_->start (sample, event.note, static_cast<float> (event.velocity) / 127.0f, &loader);
-            // Capture bank token for this voice
+            voicePool_->start (std::span<const Sample* const> { samples.data(), layerCount }, event.note,
+                               static_cast<float> (event.velocity) / 127.0f, &loader);
+            // Every layer must hold the token that keeps its decoded sample
+            // storage alive across deferred SoundFont retirement.
             const int activeBankSlot = activeBankSlot_.load (std::memory_order_relaxed);
-            const int voiceIndex = voicePool_->voiceIndexForNote (event.note);
-            if (Voice* voice = voicePool_->getVoiceAtIndex (voiceIndex))
-            {
-                BankToken token;
-                token.bankSlot = activeBankSlot;
-                token.generation = bankGeneration_[static_cast<std::size_t>(activeBankSlot)].load (std::memory_order_acquire);
-                token.bankId = bankFileHash_[static_cast<std::size_t>(activeBankSlot)];
-                voice->setBankToken (token);
-            }
+            BankToken token;
+            token.bankSlot = activeBankSlot;
+            token.generation = bankGeneration_[static_cast<std::size_t>(activeBankSlot)].load (std::memory_order_acquire);
+            token.bankId = bankFileHash_[static_cast<std::size_t>(activeBankSlot)];
+            voicePool_->setBankTokenForNote (event.note, token);
         }
     }
     else
@@ -238,21 +241,21 @@ void RomplerProcessor::dispatchMidiMessage (const juce::MidiMessage& msg, const 
     {
         const int bank = currentBank_.load (std::memory_order_relaxed);
         const int program = currentProgram_.load (std::memory_order_relaxed);
-        if (const Sample* sample = loader.getSample (bank, program, msg.getNoteNumber(), msg.getVelocity()))
+        std::array<const Sample*, SF2Loader::maxMatchingSamples> samples {};
+        const auto resolved = loader.getSamples (bank, program, msg.getNoteNumber(), msg.getVelocity(), samples);
+        const auto layerCount = std::min (resolved, samples.size());
+        if (layerCount != 0)
         {
-            voicePool_->start (sample, msg.getNoteNumber(),
+            voicePool_->start (std::span<const Sample* const> { samples.data(), layerCount }, msg.getNoteNumber(),
                                static_cast<float> (msg.getVelocity()) / 127.0f, &loader);
-            // Capture bank token for this voice
+            // The same note may own several SF2 zones, all of which need this
+            // generation token while a retired bank waits for its voices.
             const int activeBankSlot = activeBankSlot_.load (std::memory_order_relaxed);
-            const int voiceIndex = voicePool_->voiceIndexForNote (msg.getNoteNumber());
-            if (Voice* voice = voicePool_->getVoiceAtIndex (voiceIndex))
-            {
-                BankToken token;
-                token.bankSlot = activeBankSlot;
-                token.generation = bankGeneration_[static_cast<std::size_t>(activeBankSlot)].load (std::memory_order_acquire);
-                token.bankId = bankFileHash_[static_cast<std::size_t>(activeBankSlot)];
-                voice->setBankToken (token);
-            }
+            BankToken token;
+            token.bankSlot = activeBankSlot;
+            token.generation = bankGeneration_[static_cast<std::size_t>(activeBankSlot)].load (std::memory_order_acquire);
+            token.bankId = bankFileHash_[static_cast<std::size_t>(activeBankSlot)];
+            voicePool_->setBankTokenForNote (msg.getNoteNumber(), token);
         }
     }
     else if (msg.isNoteOff())
@@ -399,6 +402,24 @@ void RomplerProcessor::renderRange (juce::AudioBuffer<float>& buffer, int start,
                           blockParameters_.bpm);
     range.applyGain (blockParameters_.outputGain);
     outputSafetyProcessor_.process (range);
+
+    // Publish which notes still own a sounding voice so the editor keybed can
+    // mirror live MIDI input. Runs once per rendered range: voices that end
+    // inside this range drop out on the next segment's publish.
+    std::uint64_t lo = 0;
+    std::uint64_t hi = 0;
+    const int capacity = voicePool_->preparedCapacity();
+    for (int index = 0; index < capacity; ++index)
+        if (const Voice* voice = voicePool_->getVoiceAtIndex (index);
+            voice != nullptr && voice->isActive() && voice->note() >= 0)
+        {
+            if (voice->note() < 64)
+                lo |= std::uint64_t { 1 } << static_cast<unsigned> (voice->note());
+            else
+                hi |= std::uint64_t { 1 } << static_cast<unsigned> (voice->note() - 64);
+        }
+    activeNotesLo_.store (lo, std::memory_order_relaxed);
+    activeNotesHi_.store (hi, std::memory_order_relaxed);
 }
 
 void RomplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)

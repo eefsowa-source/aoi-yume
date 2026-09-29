@@ -111,6 +111,19 @@ public:
     /** Peak magnitude of the most recently rendered block, for the UI meter. */
     [[nodiscard]] float getLastPeak() const noexcept { return lastPeak_.load (std::memory_order_relaxed); }
 
+    /**
+        Bitmask of MIDI notes with at least one sounding voice, split into two
+        words: bits 0-63 of @p lo cover notes 0-63, @p hi covers 64-127.
+        Published by the audio thread once per rendered range, so a note stays
+        lit for its release tail and layers count once. Relaxed read for the
+        UI timer only.
+    */
+    void getActiveNotes (std::uint64_t& lo, std::uint64_t& hi) const noexcept
+    {
+        lo = activeNotesLo_.load (std::memory_order_relaxed);
+        hi = activeNotesHi_.load (std::memory_order_relaxed);
+    }
+
     /** Linked compressor gain reduction in positive dB, for the UI GR meter. */
     [[nodiscard]] float getLastCompressionReductionDb() const noexcept
     {
@@ -365,6 +378,8 @@ private:
     std::atomic<int> currentBank_ { 0 };
     std::atomic<int> currentProgram_ { 0 };
     std::atomic<float> lastPeak_ { 0.0f };
+    std::atomic<std::uint64_t> activeNotesLo_ { 0 };
+    std::atomic<std::uint64_t> activeNotesHi_ { 0 };
 
     /** Set once the bundled font has been offered up; see loadBundledSoundFont().
         Written by releaseResources() on the host's teardown thread and by the
