@@ -179,8 +179,15 @@ public:
     explicit Knob (juce::RangedAudioParameter& param, bool hot = false);
     ~Knob() override;
 
-    /** Optionally override the printed name with an explicit UI label. */
-    void setNameOverride (const juce::String& label) { name_.setText (label, juce::dontSendNotification); }
+    /** Optionally override the printed name with an explicit UI label. The
+        accessible name follows, so a screen reader hears the panel legend
+        rather than the longer host-facing parameter name. */
+    void setNameOverride (const juce::String& label)
+    {
+        name_.setText (label, juce::dontSendNotification);
+        if (label.isNotEmpty())
+            slider_.setTitle (label);
+    }
 
     /** In skin mode the knob body is part of the faceplate image; only the
         live pointer, fill arc and transient readout are drawn on top. */
@@ -204,6 +211,13 @@ public:
     /** The transient readout string, including the parameter's unit label. */
     [[nodiscard]] juce::String readoutText();
 
+    /** Keyboard operation for accessibility: the arrow keys step the
+        focused knob (hold Shift for a tenth), Home/End jump to the ends. */
+    bool keyPressed (const juce::KeyPress&) override;
+    void paintOverChildren (juce::Graphics&) override;
+    void focusGained (juce::Component::FocusChangeType) override;
+    void focusLost (juce::Component::FocusChangeType) override;
+
     /** Called (synchronously, possibly from the audio thread) when the bound
         parameter's value changes from any source - drag, wheel, host
         automation, preset restore. We only flag an async update here; the
@@ -212,6 +226,8 @@ public:
     void parameterGestureChanged (int, bool) override {}
 
 private:
+    /** Applies one keyboard step to the bound parameter. */
+    void nudge (int direction, bool fine) noexcept;
     void handleAsyncUpdate() override;
     void timerCallback() override;
     void setReadoutVisible (bool shouldBeVisible);
@@ -245,7 +261,12 @@ public:
     explicit Switch (juce::AudioParameterChoice& param, const juce::String& label = {}, bool leds = false);
     ~Switch() override;
 
-    void setLabel (const juce::String& s) { label_.setText (s, juce::dontSendNotification); }
+    void setLabel (const juce::String& s)
+    {
+        label_.setText (s, juce::dontSendNotification);
+        if (s.isNotEmpty())
+            box_.setTitle (s);
+    }
 
     /** In skin mode only the live choice is drawn over the faceplate
         artwork: a capsule readout for CURVE, an LED strip for OVERSAMPLE. */
@@ -257,6 +278,11 @@ public:
     void mouseUp (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
+
+    bool keyPressed (const juce::KeyPress&) override;
+    void paintOverChildren (juce::Graphics&) override;
+    void focusGained (juce::Component::FocusChangeType) override;
+    void focusLost (juce::Component::FocusChangeType) override;
 
 private:
     /** Moves the choice by @p direction, wrapping; negative steps backwards. */
@@ -289,7 +315,12 @@ public:
     explicit Toggle (juce::AudioParameterChoice& param, const juce::String& label = {});
     ~Toggle() override;
 
-    void setLabel (const juce::String& s) { label_.setText (s, juce::dontSendNotification); }
+    void setLabel (const juce::String& s)
+    {
+        label_.setText (s, juce::dontSendNotification);
+        if (s.isNotEmpty())
+            box_.setTitle (s);
+    }
 
     /** In skin mode the painted PRE/POST pill stays visible; the control
         only highlights the active half. */
@@ -298,6 +329,11 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
     void mouseDown (const juce::MouseEvent&) override;
+
+    bool keyPressed (const juce::KeyPress&) override;
+    void paintOverChildren (juce::Graphics&) override;
+    void focusGained (juce::Component::FocusChangeType) override;
+    void focusLost (juce::Component::FocusChangeType) override;
 
 private:
     [[maybe_unused]] juce::AudioParameterChoice& param_;
@@ -400,7 +436,12 @@ public:
     explicit Stepper (juce::RangedAudioParameter& param, const juce::String& label = {});
     ~Stepper() override;
 
-    void setLabel (const juce::String& s) { label_.setText (s, juce::dontSendNotification); }
+    void setLabel (const juce::String& s)
+    {
+        label_.setText (s, juce::dontSendNotification);
+        if (s.isNotEmpty())
+            slider_.setTitle (s);
+    }
 
     /** In skin mode the digit window replaces the painted readout with a
         live LCD; the legend stays printed on the faceplate. */
@@ -412,6 +453,11 @@ public:
     void mouseUp (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
+
+    bool keyPressed (const juce::KeyPress&) override;
+    void paintOverChildren (juce::Graphics&) override;
+    void focusGained (juce::Component::FocusChangeType) override;
+    void focusLost (juce::Component::FocusChangeType) override;
 
     /** Called (synchronously, possibly from the audio thread) when the bound
         parameter's value changes from any source. Only flags an async update;

@@ -21,6 +21,39 @@ constexpr int kLegacyMinimumHeight = 579;
 constexpr int kLegacyMaximumWidth = 2240;
 constexpr int kLegacyMaximumHeight = 1800;
 
+// The custom controls draw themselves, so the slider or combo that actually
+// carries the parameter was never a visible child. A screen reader therefore
+// saw an unnamed generic component with no role, no value and no way to be
+// operated. Re-attaching that same widget as a transparent, mouse-through
+// child restores the entire native accessibility node - role, name,
+// description, ranged value and value text - while the custom mouse handling
+// stays exactly as it was. The wrapper keeps the keyboard focus stop, so the
+// node itself must not want keyboard focus.
+template <typename Child>
+void publishAccessibleNode (Child& child, juce::Component& host,
+                            const juce::String& accessibleName,
+                            const juce::String& description)
+{
+    child.setWantsKeyboardFocus (false);
+    child.setInterceptsMouseClicks (false, false);
+    child.setAlpha (0.0f);
+    child.setTitle (accessibleName);
+    child.setDescription (description);
+    host.addAndMakeVisible (child);
+}
+
+/** The keyboard-focus ring for the custom controls. Drawn from
+    paintOverChildren() so it lands above both the drawn and the skin
+    layouts, without either paint path needing to know about focus. */
+void drawControlFocusRing (juce::Graphics& g, juce::Rectangle<int> bounds)
+{
+    const auto ring = bounds.toFloat().reduced (1.0f);
+    g.setColour (juce::Colour (0x8a000000));
+    g.drawRoundedRectangle (ring.expanded (1.2f), 6.6f, 2.6f);
+    g.setColour (theme::mintGlow);
+    g.drawRoundedRectangle (ring, 6.0f, 1.8f);
+}
+
 // A few tiny paint helpers keep the hardware treatment consistent without
 // introducing a global LookAndFeel or changing any control interaction.
 void addBrushedGrain (juce::Graphics& g, juce::Rectangle<float> area, int seed);
@@ -263,10 +296,17 @@ Knob::Knob (juce::RangedAudioParameter& param, bool hot)
 
     setTooltip (param.getName (64) + ": drag to adjust, Shift+drag or Shift+wheel for fine steps, double-click to reset");
 
-    // The slider is not a visible child (we draw the knob ourselves), so value
-    // changes that arrive through the attachment never repaint us. Registering
-    // as a parameter listener makes the pointer and value print track the
-    // parameter from any source: drag, wheel, host automation, preset load.
+    // Screen readers and keyboard users reach the parameter through a
+    // transparent child node plus the wrapper's own arrow-key handling; the
+    // drawn knob stays exactly as it was.
+    publishAccessibleNode (slider_, *this, param_.getName (64),
+                           "Drag to adjust, Shift for fine steps, double-click to reset");
+    setWantsKeyboardFocus (true);
+
+    // The transparent slider is a visible child now, but its own value changes
+    // still do not repaint us. Registering as a parameter listener makes the
+    // pointer and value print track the parameter from any source: drag, wheel,
+    // host automation, preset load.
     param_.addListener (this);
 
     addAndMakeVisible (name_);
@@ -359,6 +399,70 @@ void Knob::setReadoutVisible (bool shouldBeVisible)
 juce::String Knob::readoutText()
 {
     return slider_.getTextFromValue (slider_.getValue());
+}
+
+void Knob::nudge (int direction, bool fine) noexcept
+{
+    const auto& range = param_.getNormalisableRange();
+    const float span = range.end - range.start;
+    if (! (span > 0.0f) || direction == 0)
+        return;
+
+    // One press moves 2% of the range, never less than the parameter's own
+    // interval: a continuous control stays audible and an integer one moves in
+    // whole steps. Shift keeps the precise tenth the mouse gestures use.
+    float step = std::max (range.interval, span * 0.02f);
+    if (fine)
+        step *= 0.1f;
+
+    slider_.setValue (slider_.getValue() + (direction > 0 ? step : -step),
+                      juce::sendNotificationSync);
+    setReadoutVisible (true);
+    startTimer (650);
+}
+
+bool Knob::keyPressed (const juce::KeyPress& key)
+{
+    const auto& range = param_.getNormalisableRange();
+    const bool fine = key.getModifiers().isShiftDown();
+
+    // isKeyCode, not ==: the int comparison fails when Shift (fine steps)
+    // is held, which would make the precise gesture unreachable.
+    if (key.isKeyCode (juce::KeyPress::leftKey) || key.isKeyCode (juce::KeyPress::downKey))
+    {
+        nudge (-1, fine);
+        return true;
+    }
+    if (key.isKeyCode (juce::KeyPress::rightKey) || key.isKeyCode (juce::KeyPress::upKey))
+    {
+        nudge (1, fine);
+        return true;
+    }
+    if (key.isKeyCode (juce::KeyPress::homeKey) || key.isKeyCode (juce::KeyPress::endKey))
+    {
+        slider_.setValue (key.isKeyCode (juce::KeyPress::homeKey) ? range.start : range.end,
+                          juce::sendNotificationSync);
+        setReadoutVisible (true);
+        startTimer (650);
+        return true;
+    }
+    return false;
+}
+
+void Knob::paintOverChildren (juce::Graphics& g)
+{
+    if (hasKeyboardFocus (true))
+        drawControlFocusRing (g, getLocalBounds());
+}
+
+void Knob::focusGained (juce::Component::FocusChangeType)
+{
+    repaint();
+}
+
+void Knob::focusLost (juce::Component::FocusChangeType)
+{
+    repaint();
 }
 
 void Knob::paint (juce::Graphics& g)
@@ -598,6 +702,10 @@ void Knob::paintSkin (juce::Graphics& g)
 
 void Knob::resized()
 {
+    // The accessibility node spans the whole control so its hit area and the
+    // drawn knob agree.
+    slider_.setBounds (getLocalBounds());
+
     const auto w = getWidth();
     const auto h = getHeight();
     // The fixed legend is physically printed below the control. Its live
@@ -696,6 +804,12 @@ Switch::Switch (juce::AudioParameterChoice& param, const juce::String& label, bo
 
     setTooltip ((label.isEmpty() ? param.getName (64) : juce::String (label))
                 + ": click or drag to cycle choices, Alt-click or right-click for the previous one");
+
+    publishAccessibleNode (box_, *this,
+                           label.isEmpty() ? param.getName (32).toUpperCase() : juce::String (label),
+                           "Click or drag to cycle the choices; Alt-click steps back");
+    setWantsKeyboardFocus (true);
+
     setSize (110, 64);
 }
 
@@ -703,6 +817,8 @@ Switch::~Switch() = default;
 
 void Switch::resized()
 {
+    box_.setBounds (getLocalBounds());
+
     const auto w = getWidth();
     const int pillW = juce::jlimit (48, w - 8, 96);
     const int top = leds_ ? 2 : 4;
@@ -723,6 +839,31 @@ void Switch::advanceChoice (int direction)
     box_.setSelectedId (next, juce::sendNotificationSync);
     repaint();
 }
+
+bool Switch::keyPressed (const juce::KeyPress& key)
+{
+    if (key.isKeyCode (juce::KeyPress::leftKey) || key.isKeyCode (juce::KeyPress::upKey))
+    {
+        advanceChoice (-1);
+        return true;
+    }
+    if (key.isKeyCode (juce::KeyPress::rightKey) || key.isKeyCode (juce::KeyPress::downKey)
+        || key.isKeyCode (juce::KeyPress::spaceKey) || key.isKeyCode (juce::KeyPress::returnKey))
+    {
+        advanceChoice (1);
+        return true;
+    }
+    return false;
+}
+
+void Switch::paintOverChildren (juce::Graphics& g)
+{
+    if (hasKeyboardFocus (true))
+        drawControlFocusRing (g, getLocalBounds());
+}
+
+void Switch::focusGained (juce::Component::FocusChangeType) { repaint(); }
+void Switch::focusLost (juce::Component::FocusChangeType)   { repaint(); }
 
 void Switch::paintSkin (juce::Graphics& g)
 {
@@ -912,6 +1053,11 @@ Toggle::Toggle (juce::AudioParameterChoice& param, const juce::String& label)
     setTooltip ((label.isEmpty() ? param.getName (64) : juce::String (label))
                 + ": click to toggle");
 
+    publishAccessibleNode (box_, *this,
+                           label.isEmpty() ? param.getName (32).toUpperCase() : juce::String (label),
+                           "Click to flip between the two positions");
+    setWantsKeyboardFocus (true);
+
     setSize (110, 64);
 }
 
@@ -920,6 +1066,7 @@ Toggle::~Toggle() = default;
 void Toggle::resized()
 {
     const auto w = getWidth();
+    box_.setBounds (getLocalBounds());
     label_.setBounds (getLocalBounds().withSizeKeepingCentre (w, 14).withY (32));
 }
 
@@ -1001,6 +1148,29 @@ void Toggle::mouseDown (const juce::MouseEvent&)
     box_.setSelectedId ((box_.getSelectedId() == 1) ? 2 : 1, juce::sendNotificationSync);
     repaint();
 }
+
+bool Toggle::keyPressed (const juce::KeyPress& key)
+{
+    if (key.isKeyCode (juce::KeyPress::leftKey) || key.isKeyCode (juce::KeyPress::upKey)
+        || key.isKeyCode (juce::KeyPress::rightKey) || key.isKeyCode (juce::KeyPress::downKey)
+        || key.isKeyCode (juce::KeyPress::spaceKey) || key.isKeyCode (juce::KeyPress::returnKey))
+    {
+        // A two-way switch has only one "other" position.
+        box_.setSelectedId ((box_.getSelectedId() == 1) ? 2 : 1, juce::sendNotificationSync);
+        repaint();
+        return true;
+    }
+    return false;
+}
+
+void Toggle::paintOverChildren (juce::Graphics& g)
+{
+    if (hasKeyboardFocus (true))
+        drawControlFocusRing (g, getLocalBounds());
+}
+
+void Toggle::focusGained (juce::Component::FocusChangeType) { repaint(); }
+void Toggle::focusLost (juce::Component::FocusChangeType)   { repaint(); }
 
 // ============================================================================
 // PitchWheel / ModWheel
@@ -1239,6 +1409,12 @@ Stepper::Stepper (juce::RangedAudioParameter& param, const juce::String& label)
 
     setTooltip ((label.isEmpty() ? param.getName (64) : juce::String (label))
                 + ": drag or scroll to step the value");
+
+    publishAccessibleNode (slider_, *this,
+                           label.isEmpty() ? param.getName (32).toUpperCase() : juce::String (label),
+                           "Drag or scroll to step the value");
+    setWantsKeyboardFocus (true);
+
     setSize (110, 64);
 }
 
@@ -1260,6 +1436,7 @@ void Stepper::handleAsyncUpdate()
 void Stepper::resized()
 {
     const auto w = getWidth();
+    slider_.setBounds (getLocalBounds());
     label_.setBounds (getLocalBounds().withSizeKeepingCentre (w, 14).withY (36));
 }
 
@@ -1354,6 +1531,39 @@ void Stepper::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDet
 
     slider_.setValue (slider_.getValue() + direction * interval, juce::sendNotificationSync);
 }
+
+bool Stepper::keyPressed (const juce::KeyPress& key)
+{
+    const auto range = param_.getNormalisableRange();
+    const float interval = range.interval > 0.0f ? range.interval : 1.0f;
+
+    if (key.isKeyCode (juce::KeyPress::leftKey) || key.isKeyCode (juce::KeyPress::downKey))
+    {
+        slider_.setValue (slider_.getValue() - interval, juce::sendNotificationSync);
+        return true;
+    }
+    if (key.isKeyCode (juce::KeyPress::rightKey) || key.isKeyCode (juce::KeyPress::upKey))
+    {
+        slider_.setValue (slider_.getValue() + interval, juce::sendNotificationSync);
+        return true;
+    }
+    if (key.isKeyCode (juce::KeyPress::homeKey) || key.isKeyCode (juce::KeyPress::endKey))
+    {
+        slider_.setValue (key.isKeyCode (juce::KeyPress::homeKey) ? range.start : range.end,
+                          juce::sendNotificationSync);
+        return true;
+    }
+    return false;
+}
+
+void Stepper::paintOverChildren (juce::Graphics& g)
+{
+    if (hasKeyboardFocus (true))
+        drawControlFocusRing (g, getLocalBounds());
+}
+
+void Stepper::focusGained (juce::Component::FocusChangeType) { repaint(); }
+void Stepper::focusLost (juce::Component::FocusChangeType)   { repaint(); }
 
 // ============================================================================
 // PeakMeter
@@ -2204,11 +2414,13 @@ RomplerEditor::RomplerEditor (RomplerProcessor& processorRef)
     presetDirtyIndicator_.setFont (makeDisplayFont (13.0f, true));
     presetName_.setText ("UNTITLED", juce::dontSendNotification);
     presetDirtyIndicator_.setText ("", juce::dontSendNotification);
+    presetName_.setDescription ("Current preset; a star marks unsaved changes");
 
     addAndMakeVisible (presetButton_);
     presetButton_.setColour (juce::TextButton::textColourOffId, juce::Colour (0xff071016));
     presetButton_.setColour (juce::TextButton::textColourOnId, juce::Colour (0xff071016));
     presetButton_.onClick = [this] { openPresetBrowser(); };
+    presetButton_.setDescription ("Open the preset library: name search, category filter and favourites");
 
     addAndMakeVisible (voiceBox_);
     addAndMakeVisible (busBox_);
@@ -2259,6 +2471,14 @@ RomplerEditor::RomplerEditor (RomplerProcessor& processorRef)
         if (c)
             addAndMakeVisible (*c);
     }
+
+    // Tab order follows the flat control list, which is already ordered along
+    // the signal path (VOICE -> BUS -> COMP -> ENV -> FX), so a keyboard user
+    // walks the panel the way the audio does.
+    for (int i = 0; i < static_cast<int> (controls_.size()); ++i)
+        if (auto* control = controls_[static_cast<std::size_t> (i)].get())
+            control->setExplicitFocusOrder (i + 1);
+
     addAndMakeVisible (*envGraph_);
 
     addAndMakeVisible (compPathLabel_);
@@ -2342,6 +2562,7 @@ RomplerEditor::RomplerEditor (RomplerProcessor& processorRef)
     loadButton_.setColour (juce::TextButton::textColourOffId, juce::Colour (0xff071016));
     loadButton_.setColour (juce::TextButton::textColourOnId, juce::Colour (0xff071016));
     loadButton_.onClick = [this] { onLoadButtonClicked(); };
+    loadButton_.setDescription ("Load a SoundFont file (.sf2 or .sf3)");
 
     addAndMakeVisible (peakMeter_);
 

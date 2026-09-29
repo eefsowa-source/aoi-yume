@@ -266,3 +266,134 @@ TEST_CASE ("keyboard draws only the notes it is told are sounding", "[ui][intera
     keyboard.setNoteOn (60, false);
     REQUIRE_FALSE (keyboard.isNoteLit (60));
 }
+
+namespace
+{
+/** Depth-first list of every descendant component of @p root. */
+void collectDescendants (juce::Component& root, std::vector<juce::Component*>& out)
+{
+    for (auto* child : root.getChildren())
+    {
+        out.push_back (child);
+        collectDescendants (*child, out);
+    }
+}
+
+/** The component whose accessibility handler carries @p title and @p role. */
+juce::Component* findAccessibleByTitle (juce::Component& root,
+                                        juce::AccessibilityRole role,
+                                        const char* title)
+{
+    std::vector<juce::Component*> all;
+    collectDescendants (root, all);
+    for (auto* c : all)
+        if (auto* handler = c->getAccessibilityHandler())
+            if (handler->getRole() == role && handler->getTitle() == title)
+                return c;
+    return nullptr;
+}
+
+/** JUCE only creates accessibility handlers for components under a native
+    peer, so tests that walk the accessible tree need the editor on the
+    desktop. The component stays invisible, which keeps the peer window
+    offscreen. */
+struct TemporaryDesktopPeer
+{
+    explicit TemporaryDesktopPeer (juce::Component& c) : component (c)
+    {
+        component.addToDesktop (juce::ComponentPeer::windowIsTemporary);
+    }
+    ~TemporaryDesktopPeer() { component.removeFromDesktop(); }
+    juce::Component& component;
+};
+} // namespace
+
+TEST_CASE ("parameter controls expose a named, valued accessibility node", "[ui][accessibility]")
+{
+    const juce::ScopedJuceInitialiser_GUI gui;
+    aod::RomplerProcessor processor;
+    aod::RomplerEditor editor (processor);
+    const TemporaryDesktopPeer peer (editor);
+
+    // The wrappers draw themselves, so the parameter-carrying slider or combo
+    // must sit inside them as a transparent child node. Without that wiring a
+    // screen reader saw only an unnamed, ignored component per control.
+    for (const auto* title : { "DRIVE", "SUSTAIN", "RELEASE", "POLYPHONY" })
+    {
+        auto* node = findAccessibleByTitle (editor, juce::AccessibilityRole::slider, title);
+        CAPTURE (title);
+        REQUIRE (node != nullptr);
+        auto* handler = node->getAccessibilityHandler();
+        REQUIRE (handler->getDescription().isNotEmpty());
+        REQUIRE (handler->getValueInterface() != nullptr);
+        REQUIRE (handler->getCurrentState().isFocusable());
+    }
+
+    for (const auto* title : { "CURVE", "LEGATO" })
+    {
+        CAPTURE (title);
+        REQUIRE (findAccessibleByTitle (editor, juce::AccessibilityRole::comboBox, title) != nullptr);
+    }
+
+    // The sustain knob reads back its value with units, not just a name.
+    auto* sustain = findAccessibleByTitle (editor, juce::AccessibilityRole::slider, "SUSTAIN");
+    REQUIRE (sustain != nullptr);
+    auto* value = sustain->getAccessibilityHandler()->getValueInterface();
+    REQUIRE (value->getCurrentValueAsString().contains ("%"));
+    const auto range = value->getRange();
+    REQUIRE (range.isValid());
+    REQUIRE (range.getMinimumValue() == Catch::Approx (0.0));
+    REQUIRE (range.getMaximumValue() == Catch::Approx (100.0));
+}
+
+TEST_CASE ("a focused knob steps its parameter with the arrow keys", "[ui][accessibility]")
+{
+    const juce::ScopedJuceInitialiser_GUI gui;
+    aod::RomplerProcessor processor;
+    aod::RomplerEditor editor (processor);
+    const TemporaryDesktopPeer peer (editor);
+
+    auto* sustainNode = findAccessibleByTitle (editor, juce::AccessibilityRole::slider, "SUSTAIN");
+    REQUIRE (sustainNode != nullptr);
+    auto* knob = sustainNode->getParentComponent();
+    REQUIRE (knob != nullptr);
+
+    auto& param = rangedParameter (processor, aod::ParamIDs::envSustain);
+    param.setValueNotifyingHost (param.convertTo0to1 (50.0f));
+
+    // A full arrow press steps 2% of the 0..100 range; the interval floor is
+    // only 0.01, which would be an inaudible nudge on its own.
+    knob->keyPressed (juce::KeyPress (juce::KeyPress::leftKey));
+    REQUIRE (parameterValue (param) == Catch::Approx (48.0).margin (0.25));
+
+    // Shift narrows the step to a tenth, matching the fine mouse gestures.
+    knob->keyPressed (juce::KeyPress (juce::KeyPress::leftKey,
+                                      juce::ModifierKeys (juce::ModifierKeys::shiftModifier), 0));
+    REQUIRE (parameterValue (param) == Catch::Approx (47.8).margin (0.1));
+
+    knob->keyPressed (juce::KeyPress (juce::KeyPress::endKey));
+    REQUIRE (parameterValue (param) == Catch::Approx (100.0).margin (0.25));
+}
+
+TEST_CASE ("a focused switch cycles its choice with the arrow keys", "[ui][accessibility]")
+{
+    const juce::ScopedJuceInitialiser_GUI gui;
+    aod::RomplerProcessor processor;
+    aod::RomplerEditor editor (processor);
+    const TemporaryDesktopPeer peer (editor);
+
+    auto* node = findAccessibleByTitle (editor, juce::AccessibilityRole::comboBox, "CURVE");
+    REQUIRE (node != nullptr);
+    auto* control = node->getParentComponent();
+    REQUIRE (control != nullptr);
+
+    auto* param = dynamic_cast<juce::AudioParameterChoice*> (
+        processor.getValueTreeState().getParameter (aod::ParamIDs::voiceCurve));
+    REQUIRE (param != nullptr);
+
+    const int before = param->getIndex();
+    control->keyPressed (juce::KeyPress (juce::KeyPress::rightKey));
+    REQUIRE (param->getIndex() == (before + 1) % param->choices.size());
+    control->keyPressed (juce::KeyPress (juce::KeyPress::leftKey));
+    REQUIRE (param->getIndex() == before);
+}
