@@ -5,6 +5,7 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <x10/instrument/RegionIndex.h>
 #include <x10/dsp/nonlinear/Curves.h>
+#include <x10/dsp/nonlinear/Adaa1.h>
 #include <x10/dsp/filter/TptSvf.h>
 #include <x10/dsp/envelope/Adsr.h>
 #include <array>
@@ -64,6 +65,49 @@ struct Sample
 class Voice
 {
 public:
+    /**
+        Per-voice nonlinear drive with first-order antiderivative antialiasing.
+
+        A separate type rather than an inline formula so the alias gate can
+        measure the stage the audio path actually uses instead of a copy of it.
+        Each curve keeps its own ADAA state, because a cached antiderivative value
+        is only meaningful to the curve that produced it; entering another curve
+        with stale state would be a mismatched F1 and can spike.
+
+        Cost is one antiderivative evaluation per sample where the previous code
+        evaluated the curve itself. logCosh is two library calls, so the CPU
+        matrix is recorded next to this change rather than assumed.
+    */
+    class Drive
+    {
+    public:
+        /**
+            Selects antiderivative antialiasing.
+
+            Off by default because it changes the sound of every patch with
+            DRIVE above zero: first-order ADAA evaluates a two-point average in
+            the small-signal limit, which measured 11.7 dB down at 20 kHz. The
+            alias gain and that cost are both pinned by tests, so enabling this
+            is a listening decision rather than a hidden default change.
+        */
+        void setAntialiasing (bool shouldAntialias) noexcept { antialias_ = shouldAntialias; }
+        [[nodiscard]] bool antialiasing() const noexcept { return antialias_; }
+
+        /** @returns @p x blended with the driven signal by @p blend (0 = dry). */
+        [[nodiscard]] float process (float x, int curveId, float blend, float gain) noexcept;
+        void reset() noexcept;
+
+    private:
+        [[nodiscard]] float curveValue (float driven, int curveId) noexcept;
+        [[nodiscard]] static float directValue (float driven, int curveId) noexcept;
+
+        x10::dsp::Adaa1<x10::dsp::curves::Tanh> tanh_;
+        x10::dsp::Adaa1<x10::dsp::curves::Tube> tube_;
+        x10::dsp::Adaa1<x10::dsp::curves::Transformer> transformer_;
+        int lastCurveId_ = -1;
+        bool antialias_ = false;
+    };
+
     ~Voice();
     void start(const Sample* sample, int midiNote, float velocity,
                const SF2Loader* sampleOwner = nullptr) noexcept;
@@ -181,6 +225,7 @@ private:
 
     x10::dsp::Adsr adsr_;
     VolumeEnvelope volumeEnvelope_;
+    Drive drive_;
     // Bit-pattern hash of the last pushed envelope parameter block; see render()
     // for why we must not re-push identical values every block.
     std::uint32_t envParamHash_ = 0;

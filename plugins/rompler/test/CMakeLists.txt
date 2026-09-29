@@ -3,6 +3,7 @@ add_executable(rompler_tests
     test_sf2_playback.cpp
     test_dsp_behaviors.cpp
     test_sampler_quality.cpp
+    test_voice_drive.cpp
     "${CMAKE_SOURCE_DIR}/libs/instrument/test/support/AllocationGuard.cpp"
     test_bus_processor.cpp
     test_dynamics_processor.cpp
@@ -34,7 +35,10 @@ target_link_libraries(rompler_tests PRIVATE
 
 target_include_directories(rompler_tests PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/../Source"
-    "${CMAKE_SOURCE_DIR}/libs/instrument/test")
+    "${CMAKE_SOURCE_DIR}/libs/instrument/test"
+    # The alias gate and its spectral fixtures, so the voice drive is measured
+    # with the same instrument the library tests use instead of a local copy.
+    "${CMAKE_SOURCE_DIR}/libs/x10_dsp/test")
 
 target_compile_options(rompler_tests PRIVATE -Wall -Wextra -Wpedantic -Werror -Wshadow)
 

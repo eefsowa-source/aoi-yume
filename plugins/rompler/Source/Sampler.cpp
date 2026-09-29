@@ -33,6 +33,58 @@ namespace
     constexpr float kEqualPowerUnityScale = juce::MathConstants<float>::sqrt2;
 }
 
+float Voice::Drive::curveValue (float driven, int curveId) noexcept
+{
+    if (curveId == 1)
+        return tube_.process (driven);
+    if (curveId == 2)
+        return transformer_.process (driven);
+
+    return tanh_.process (driven);
+}
+
+float Voice::Drive::directValue (float driven, int curveId) noexcept
+{
+    if (curveId == 1)
+        return x10::dsp::curves::Tube::f (driven);
+    if (curveId == 2)
+        return x10::dsp::curves::Transformer::f (driven);
+
+    return x10::dsp::curves::Tanh::f (driven);
+}
+
+float Voice::Drive::process (float x, int curveId, float blend, float gain) noexcept
+{
+    if (blend <= 0.0f || ! std::isfinite (gain) || gain <= 0.0f)
+        return x;
+
+    if (curveId != lastCurveId_)
+    {
+        // The cached F1 belongs to the curve that produced it, so entering a
+        // different curve with that value would be a mismatched antiderivative.
+        if (curveId == 1)
+            tube_.reset();
+        else if (curveId == 2)
+            transformer_.reset();
+        else
+            tanh_.reset();
+        lastCurveId_ = curveId;
+    }
+
+    const float driven = gain * x;
+    const float coloured = (antialias_ ? curveValue (driven, curveId)
+                                       : directValue (driven, curveId)) / gain;
+    return x + blend * (coloured - x);
+}
+
+void Voice::Drive::reset() noexcept
+{
+    tanh_.reset();
+    tube_.reset();
+    transformer_.reset();
+    lastCurveId_ = -1;
+}
+
 void Voice::VolumeEnvelope::reset (const x10::instrument::Envelope& parameters) noexcept
 {
     parameters_ = parameters;
@@ -231,6 +283,7 @@ void Voice::start(const Sample* sample, int midiNote, float velocity,
     vibratoPhase_ = 0.0;
     active_ = true;
     driveNeedsReset_ = true;
+    drive_.reset();
     filterNeedsPrepare_ = true;
     attenuationGain_ = std::pow (10.0f,
                                  -std::clamp (std::isfinite (sample->attenuationDb)
@@ -297,6 +350,7 @@ void Voice::retire() noexcept
     envelopeLevel_ = 0.0f;
     attenuationGain_ = 1.0f;
     zoneReleaseMs_ = 0.0f;
+    drive_.reset();
 }
 
 void Voice::stop() noexcept
@@ -582,15 +636,7 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
             const float driveGain = driveIsSmoothing
                 ? std::pow (10.0f, currentDriveDb / 20.0f)
                 : steadyDriveGain;
-            const float driven = driveGain * sample;
-            float coloured = sample;
-            if (curveId == 1)
-                coloured = x10::dsp::curves::Tube::f (driven) / driveGain;
-            else if (curveId == 2)
-                coloured = x10::dsp::curves::Transformer::f (driven) / driveGain;
-            else // curveId == 0 or default
-                coloured = x10::dsp::curves::Tanh::f (driven) / driveGain;
-            sample += driveBlend * (coloured - sample);
+            sample = drive_.process (sample, curveId, driveBlend, driveGain);
         }
 
         if (filterRouting != 0) // Post: filter after drive
