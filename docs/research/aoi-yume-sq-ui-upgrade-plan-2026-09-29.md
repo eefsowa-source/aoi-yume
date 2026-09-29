@@ -360,16 +360,19 @@ paintOverChildren에서 그려서 drawn과 스킨 레이아웃 위를 모두 덮
 - `ui_shot` 오프스크린 렌더 1563x1006 - 패널이 정상 그려진다. 포커스 링은
   키보드 포커스가 있을 때만 나타나므로 이 캡처에는 없다.
 
-빌드 산출물 SHA256(RelWithDebInfo, `7f706cd`):
+빌드 산출물 SHA256(RelWithDebInfo, 1단계 `7f706cd`, 2단계 `abbc3a1`로 갱신):
 
 ```
-0f072b7944bffd082c1ae4eb0cd7df4992e90cfdf61d41bcaf1be5149aad1f7a  VST3/Aoi YUME.vst3/Contents/MacOS/Aoi YUME
-877f4ee1c46f8bce41fae2e727b416960cfb1ff37e4624a752e3536b75b65855  AU/Aoi YUME.component/Contents/MacOS/Aoi YUME
-f4fabb638ab15bc8df3f592226a96c72bb37cb8bc2d66adb21d6fd67d70deee7  Standalone/Aoi YUME.app/Contents/MacOS/Aoi YUME
+e0652e7c87ca90283ea6f18487d855faafe67f4ffcc6a388f2a74688caa83453  VST3/Aoi YUME.vst3/Contents/MacOS/Aoi YUME
+e0279f844d5ff6e2f5dd52820eb92634c75c236b5c9fc55759c3e220572a6f29  AU/Aoi YUME.component/Contents/MacOS/Aoi YUME
+059b558fdaf1d9712a25653c9e44b8add59bb503f1a881f184a315f5bc99601d  Standalone/Aoi YUME.app/Contents/MacOS/Aoi YUME
 ```
 
-미검증: auval은 설치된 AU가 2026-09-19 바이너리(`9af0d85c`)라 현재 빌드와 해시가
-달라 게이트 증거로 쓸 수 없다. 호스트 로딩과 청취는 사용자만 확인 가능하다.
+auval: 1단계 시점에는 설치된 AU가 2026-09-19 바이너리(`9af0d85c`)라 해시가 달라
+게이트 증거로 쓸 수 없었다. 2단계에서 현재 빌드를 `~/Library/Audio/Plug-Ins/`에
+설치한 뒤 `auval -v aumu AoYu EonL`이 AU VALIDATION SUCCEEDED를 냈다.
+
+호스트(DAW) 로딩과 실제 청취는 사용자만 확인 가능하다.
 
 ### UX-4 2단계 - 키보드 게이트와 패널 범례 수정 (2026-09-30)
 
