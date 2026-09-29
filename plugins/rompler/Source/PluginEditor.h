@@ -189,6 +189,19 @@ public:
             slider_.setTitle (label);
     }
 
+    /** Override only the accessible name, leaving the printed legend alone.
+        Two panel legends can legitimately repeat - the envelope and the
+        compressor both engrave ATTACK and RELEASE - while the two parameters
+        behind them are entirely different. A screen reader announcing "ATTACK"
+        twice with no way to tell them apart is unusable, so those few controls
+        pass a disambiguated name here while the faceplate keeps its short
+        hardware caption. */
+    void setAccessibleName (const juce::String& name)
+    {
+        if (name.isNotEmpty())
+            slider_.setTitle (name);
+    }
+
     /** In skin mode the knob body is part of the faceplate image; only the
         live pointer, fill arc and transient readout are drawn on top. */
     void setSkinMode (bool on);

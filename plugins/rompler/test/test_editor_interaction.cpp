@@ -5,6 +5,11 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_gui_extra/juce_gui_extra.h>
 
+#include <algorithm>
+#include <map>
+#include <string>
+#include <vector>
+
 #include "PluginEditor.h"
 #include "PluginProcessor.h"
 
@@ -294,6 +299,47 @@ juce::Component* findAccessibleByTitle (juce::Component& root,
     return nullptr;
 }
 
+/** Every accessible control title, keyed by the wrapper that carries the
+    keyboard focus stop. The panel draws each module as its own 2-row block,
+    so a flat y/x sort over the whole panel interleaves the second row of one
+    module with the first row of the next; the reading order therefore has to
+    come from the panel's own module order, not from raw coordinates. */
+std::vector<std::pair<juce::Component*, std::string>> accessibleControls (juce::Component& root)
+{
+    std::vector<juce::Component*> all;
+    collectDescendants (root, all);
+
+    std::vector<std::pair<juce::Component*, std::string>> entries;
+    for (auto* c : all)
+    {
+        auto* handler = c->getAccessibilityHandler();
+        if (handler == nullptr)
+            continue;
+        if (handler->getRole() != juce::AccessibilityRole::slider
+            && handler->getRole() != juce::AccessibilityRole::comboBox)
+            continue;
+
+        // The transparent parameter node shares its bounds with the wrapper
+        // that carries the keyboard focus stop, so either one yields the same
+        // panel position. Reading the wrapper keeps the two from double
+        // counting.
+        auto* const host = c->getParentComponent() != nullptr && c->getParentComponent()->getWantsKeyboardFocus()
+                             ? c->getParentComponent()
+                             : c;
+        if (host->getParentComponent() == nullptr)
+            continue;
+
+        // The pitch and mod wheels are focusable and hold a slider, but they
+        // are not parameter controls and carry no title, so they are not part
+        // of the reading order being compared here.
+        if (handler->getTitle().isEmpty())
+            continue;
+
+        entries.emplace_back (host, handler->getTitle().toStdString());
+    }
+    return entries;
+}
+
 /** JUCE only creates accessibility handlers for components under a native
     peer, so tests that walk the accessible tree need the editor on the
     desktop. The component stays invisible, which keeps the peer window
@@ -306,6 +352,11 @@ struct TemporaryDesktopPeer
         // grabKeyboardFocus refuses anything that is not showing, so a peer
         // alone is not enough to exercise the keyboard path.
         component.setVisible (true);
+        // The panel only positions its controls inside resized(), and a peer
+        // does not run that on its own. Give it the design size the faceplate
+        // was drawn at so a test reading control bounds sees the real layout
+        // rather than the default empty one.
+        component.setSize (1563, 1006);
     }
     ~TemporaryDesktopPeer() { component.removeFromDesktop(); }
     juce::Component& component;
@@ -322,7 +373,7 @@ TEST_CASE ("parameter controls expose a named, valued accessibility node", "[ui]
     // The wrappers draw themselves, so the parameter-carrying slider or combo
     // must sit inside them as a transparent child node. Without that wiring a
     // screen reader saw only an unnamed, ignored component per control.
-    for (const auto* title : { "DRIVE", "SUSTAIN", "RELEASE", "POLYPHONY",
+    for (const auto* title : { "DRIVE", "SUSTAIN", "Envelope Release", "POLYPHONY",
                                "PING-PONG FEEDBACK", "DELAY MIX" })
     {
         auto* node = findAccessibleByTitle (editor, juce::AccessibilityRole::slider, title);
@@ -504,22 +555,141 @@ TEST_CASE ("the tab walk reaches every parameter control in signal order", "[ui]
     REQUIRE (indexOf (sustain->getParentComponent()) > indexOf (drive->getParentComponent()));
     REQUIRE (indexOf (trim->getParentComponent()) < indexOf (sustain->getParentComponent()));
 
-    // The envelope follows the FX rail on the panel, so ATTACK has to come
-    // after CHORUS RATE. controls_ allocates the two delay knobs at 27/28,
-    // ahead of the envelope at 17..20, so array order and panel order are not
-    // the same thing and the walk is what keeps them honest.
-    auto* attack = findAccessibleByTitle (editor, juce::AccessibilityRole::slider, "ATTACK");
+    // The panel draws the compressor before the envelope, and the FX rail last
+    // across the bottom, so CHORUS RATE has to come after the envelope. The
+    // control array allocates the FX rail at 11..16 and 27..28 and the envelope
+    // at 17..20, so array order and panel order are not the same thing and the
+    // walk is what keeps them honest. The two attack knobs share a printed
+    // legend, so they are told apart by their disambiguated accessible names.
+    auto* attack = findAccessibleByTitle (editor, juce::AccessibilityRole::slider, "Envelope Attack");
     auto* chorusRate = findAccessibleByTitle (editor, juce::AccessibilityRole::slider, "CHORUS RATE");
     REQUIRE (attack != nullptr);
     REQUIRE (chorusRate != nullptr);
 
-    const auto firstAttack = indexOf (attack->getParentComponent());
-    REQUIRE (firstAttack >= 0);
-    for (auto* c : walked)
+    REQUIRE (indexOf (attack->getParentComponent()) >= 0);
+    REQUIRE (indexOf (chorusRate->getParentComponent()) > indexOf (attack->getParentComponent()));
+
+    // The compressor is drawn to the left of the envelope, so its controls
+    // come first even though they are allocated after it.
+    auto* threshold = findAccessibleByTitle (editor, juce::AccessibilityRole::slider, "THRESHOLD");
+    REQUIRE (threshold != nullptr);
+    REQUIRE (indexOf (threshold->getParentComponent()) < indexOf (attack->getParentComponent()));
+}
+
+TEST_CASE ("no two parameter controls share an accessible name", "[ui][accessibility]")
+{
+    const juce::ScopedJuceInitialiser_GUI gui;
+    aod::RomplerProcessor processor;
+    aod::RomplerEditor editor (processor);
+    const TemporaryDesktopPeer peer (editor);
+
+    // The panel draws "ATTACK" and "RELEASE" twice: once for the envelope and
+    // once for the compressor. Two nodes answering to the same name is not a
+    // cosmetic problem - a screen reader user hearing "ATTACK, slider" has no
+    // way to know which of the two they are on, because the two parameters do
+    // completely different things to the signal. The host-facing parameter
+    // names are unique, so the fix is to disambiguate there and keep the
+    // printed legend as the visual anchor.
+    std::vector<juce::Component*> all;
+    collectDescendants (editor, all);
+
+    std::map<juce::String, int> seen;
+    for (auto* c : all)
     {
         auto* handler = c->getAccessibilityHandler();
-        if (handler == nullptr || handler->getTitle() != "CHORUS RATE")
+        if (handler == nullptr)
             continue;
-        REQUIRE (indexOf (c) < firstAttack);
+        if (handler->getRole() != juce::AccessibilityRole::slider
+            && handler->getRole() != juce::AccessibilityRole::comboBox)
+            continue;
+        if (handler->getTitle().isEmpty())
+            continue;
+        ++seen[handler->getTitle()];
     }
+
+    for (const auto& [title, count] : seen)
+    {
+        CAPTURE (title.toStdString());
+        REQUIRE (count == 1);
+    }
+}
+
+TEST_CASE ("the tab walk follows the panel left to right, not the control array", "[ui][accessibility]")
+{
+    const juce::ScopedJuceInitialiser_GUI gui;
+    aod::RomplerProcessor processor;
+    aod::RomplerEditor editor (processor);
+    const TemporaryDesktopPeer peer (editor);
+
+    const auto& traversable = editor.createFocusTraverser();
+    REQUIRE (traversable != nullptr);
+
+    // Each custom control is a focusable wrapper whose name lives on the
+    // transparent parameter node inside it, so the walk has to be read
+    // through the wrapper. PRESETS and LOAD are real buttons and are not part
+    // of the parameter reading order.
+    std::vector<std::string> walkTitles;
+    for (auto* c = traversable->getDefaultComponent (&editor);
+         c != nullptr && walkTitles.size() < 64;
+         c = traversable->getNextComponent (c))
+    {
+        if (! c->getWantsKeyboardFocus())
+            continue;
+        if (dynamic_cast<aod::HardwareButton*> (c) != nullptr)
+            continue;
+
+        std::vector<juce::Component*> inner;
+        collectDescendants (*c, inner);
+        for (auto* node : inner)
+            if (auto* handler = node->getAccessibilityHandler())
+                if (handler->getRole() == juce::AccessibilityRole::slider
+                    || handler->getRole() == juce::AccessibilityRole::comboBox)
+                {
+                    walkTitles.push_back (handler->getTitle().toStdString());
+                    break;
+                }
+    }
+
+    // Tab must land where the eye would. controls_ groups the controls by
+    // parameter type, so array order runs VOICE -> BUS -> FX -> ENV -> COMP
+    // while the panel is drawn VOICE -> BUS -> COMP -> ENV with the FX rail
+    // across the bottom. Walking by array index sent the keyboard down to the
+    // FX rail and back up again for every envelope knob.
+    const std::vector<std::string> panelOrder = {
+        "DRIVE", "VELOCITY > DRIVE", "FILTER OFFSET", "POLYPHONY", "LEGATO",
+        "CURVE", "FILTER ROUTE",
+        "TAPE DRIVE", "FOLD", "FILTER CUTOFF", "RESONANCE", "OVERSAMPLING",
+        "OUTPUT TRIM", "OUTPUT MIX",
+        "THRESHOLD", "RATIO", "Compressor Attack", "Compressor Release",
+        "MAKEUP", "COMP MIX",
+        "Envelope Attack", "DECAY", "SUSTAIN", "Envelope Release",
+        "CHORUS RATE", "CHORUS DEPTH", "CHORUS MIX",
+        "REVERB ROOM", "REVERB DAMP", "REVERB MIX",
+        "PING-PONG FEEDBACK", "DELAY MIX"
+    };
+
+    REQUIRE (walkTitles.size() == panelOrder.size());
+    REQUIRE (walkTitles == panelOrder);
+
+    // Pin it to the drawn geometry too, so the list cannot silently drift
+    // away from the faceplate: every control's x has to increase along the
+    // FX rail, and the ENV block has to sit above it.
+    const auto entryFor = [&] (const juce::String& title) -> juce::Rectangle<int>
+    {
+        for (const auto& [host, name] : accessibleControls (editor))
+            if (name == title.toStdString())
+                return host->getBounds();
+        return {};
+    };
+
+    const auto chorusRate = entryFor ("CHORUS RATE");
+    const auto feedback = entryFor ("PING-PONG FEEDBACK");
+    const auto delayMix = entryFor ("DELAY MIX");
+    REQUIRE_FALSE (chorusRate.isEmpty());
+    REQUIRE_FALSE (feedback.isEmpty());
+    REQUIRE_FALSE (delayMix.isEmpty());
+
+    REQUIRE (chorusRate.getX() < feedback.getX());
+    REQUIRE (feedback.getX() < delayMix.getX());
+    REQUIRE (chorusRate.getY() < feedback.getY());
 }

@@ -1401,6 +1401,11 @@ Stepper::Stepper (juce::RangedAudioParameter& param, const juce::String& label)
 
     slider_.setRange (param.getNormalisableRange().start, param.getNormalisableRange().end, 1.0);
     slider_.setValue (param.getValue(), juce::dontSendNotification);
+    // The digits are drawn by paint(), so the slider must not also build a
+    // text box. Left enabled, JUCE creates a hidden SliderLabelComp that
+    // wants keyboard focus, and a screen-reader user tabs onto an invisible
+    // text field in the middle of the panel with no label and no value.
+    slider_.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
     attachment_ = std::make_unique<juce::SliderParameterAttachment> (param, slider_);
 
     // See Knob: the hidden slider's value changes do not repaint the readout
@@ -2478,12 +2483,42 @@ RomplerEditor::RomplerEditor (RomplerProcessor& processorRef)
             addAndMakeVisible (*c);
     }
 
-    // Tab order follows the flat control list, which is already ordered along
-    // the signal path (VOICE -> BUS -> COMP -> ENV -> FX), so a keyboard user
-    // walks the panel the way the audio does.
+    // Tab order has to be the order the panel is read, not the order the
+    // controls happen to be allocated in. controls_ groups the controls by
+    // parameter type, so array order runs VOICE -> BUS -> FX -> ENV -> COMP,
+    // while the panel is drawn VOICE -> BUS -> COMP -> ENV and then the FX rail
+    // across the bottom. Walking by array index sent the keyboard down to the
+    // FX rail and back up for every envelope knob, so a keyboard user and a
+    // sighted user read the panel in two different orders. List the controls
+    // in the order they are laid out instead.
+    const int panelOrder[] = {
+        // VOICE row: three big knobs, then polyphony and legato, then the two
+        // switches underneath.
+        0, 2, 4, 5, 31, 1, 3,
+        // BUS
+        6, 7, 29, 30, 8, 9, 10,
+        // COMP: threshold / ratio / attack, then release / makeup / mix.
+        21, 22, 23, 24, 25, 26,
+        // ENV
+        17, 18, 19, 20,
+        // FX rail, left to right: chorus, reverb, then the two delay knobs.
+        // The faceplate prints PING-PONG FEEDBACK to the left of DELAY MIX, so
+        // the walk follows the artwork rather than the allocation order.
+        11, 12, 13, 14, 15, 16, 28, 27
+    };
+
+    int order = 1;
+    for (const auto idx : panelOrder)
+        if (auto* control = controls_[static_cast<std::size_t> (idx)].get())
+            control->setExplicitFocusOrder (order++);
+
+    // Anything not named above (a control added later, or one left null) still
+    // needs a deterministic position rather than an implicit one, so park it
+    // after the controls the panel reads in order.
     for (int i = 0; i < static_cast<int> (controls_.size()); ++i)
         if (auto* control = controls_[static_cast<std::size_t> (i)].get())
-            control->setExplicitFocusOrder (i + 1);
+            if (control->getExplicitFocusOrder() == 0)
+                control->setExplicitFocusOrder (order++);
 
     addAndMakeVisible (*envGraph_);
 
@@ -2547,6 +2582,22 @@ RomplerEditor::RomplerEditor (RomplerProcessor& processorRef)
     setKnobLabel (controls_[25], "MAKEUP");
     setKnobLabel (controls_[26], "COMP MIX");
     setChoiceLabel (controls_[31], "LEGATO");
+
+    // The envelope and the compressor both engrave ATTACK and RELEASE on the
+    // panel, so the legend alone cannot tell a screen reader which parameter
+    // it is announcing. Give those four controls a disambiguated accessible
+    // name while leaving the printed caption short - the faceplate reads as a
+    // hardware panel, and the reader hears "Envelope Attack" against
+    // "Compressor Attack" instead of the same word twice.
+    const auto setKnobAccessibleName = [] (std::unique_ptr<juce::Component>& c, const juce::String& s)
+    {
+        if (auto* k = dynamic_cast<Knob*> (c.get()))
+            k->setAccessibleName (s);
+    };
+    setKnobAccessibleName (controls_[17], "Envelope Attack");
+    setKnobAccessibleName (controls_[20], "Envelope Release");
+    setKnobAccessibleName (controls_[23], "Compressor Attack");
+    setKnobAccessibleName (controls_[24], "Compressor Release");
 
     // Dock: soundfont display + bank/program + load + peak meter.
     addAndMakeVisible (sfLabel_);
