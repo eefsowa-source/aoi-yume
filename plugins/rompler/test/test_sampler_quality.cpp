@@ -273,3 +273,34 @@ TEST_CASE ("drive automation crosses zero continuously in both directions", "[qu
         }
     }
 }
+
+// Hidden diagnostic. Prints the peak of one full-scale 997 Hz note against the
+// DRIVE setting for each curve. Run with '[diagnostic]'.
+//
+// It currently shows the DRIVE knob acting as a fader rather than a saturator:
+// the wet path is f(gain * x) / gain, and dividing a saturating curve's output
+// by the pre-curve gain collapses the level by exactly the drive in dB (-12 dB
+// at 12, -50 dB at 50, -100 dB at 100). Recorded in the SQ-3 notes of
+// docs/research/aoi-yume-sq-ui-upgrade-plan-2026-09-29.md; changing it changes
+// the sound of every patch with DRIVE above zero, so it needs its own decision.
+TEST_CASE ("voice drive transfer diagnostic", "[.][diagnostic]")
+{
+    const auto sample = makeSine (997.0f, 48000);
+    for (const float drive : { 0.0f, 0.5f, 1.0f, 2.0f, 6.0f, 12.0f, 25.0f, 50.0f, 75.0f, 100.0f })
+        for (const int curve : { 0, 1, 2 })
+        {
+            aod::VoicePool pool (1);
+            pool.start (&sample, 60, 1.0f);
+            std::vector<float> rendered (4800, 0.0f);
+            pool.render (rendered.data(), 4800, kSampleRate,
+                         drive, 0.0f, curve, 0, 0.0f,
+                         0.0f, 1000.0f, 1.0f, 1000.0f,
+                         0.0f, 0.0f);
+            float peak = 0.0f;
+            for (const float value : rendered)
+                peak = std::max (peak, std::abs (value));
+            WARN ("drive=" << drive << " curve=" << curve << " peak=" << peak
+                           << " peakDb=" << toDb (peak)
+                           << " h997=" << toDb (magnitudeAt (rendered, 997.0f)));
+        }
+}
