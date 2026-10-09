@@ -144,10 +144,25 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
 
         const auto index = static_cast<std::int64_t>(phase_);
         const float frac = static_cast<float>(phase_ - static_cast<double>(index));
-        const float s0 = sampleData[static_cast<std::size_t>(index)];
-        const auto s1Index = (index + 1 < sampleCount) ? index + 1 : sampleCount - 1;
-        const float s1 = sampleData[static_cast<std::size_t>(s1Index)];
-        const float interpolated = s0 + frac * (s1 - s0);
+
+        // 4-point Lagrange interpolation. Linear interpolation images badly
+        // above ~+7 semitones; the extra two taps cost little and stay exact
+        // at integer phases. Taps inside the loop wrap so a sustained note
+        // reads continuous data; taps before the loop and past the end clamp.
+        const auto tapIndex = [&] (std::int64_t tap) noexcept
+        {
+            if (looping && tap >= loopEnd)
+                tap = loopStart + (tap - loopEnd);
+            return static_cast<std::size_t> (std::clamp (tap, std::int64_t { 0 }, sampleCount - 1));
+        };
+        const float sm1 = sampleData[tapIndex (index - 1)];
+        const float s0  = sampleData[tapIndex (index)];
+        const float s1  = sampleData[tapIndex (index + 1)];
+        const float s2  = sampleData[tapIndex (index + 2)];
+        const float interpolated =
+            s0 + 0.5f * frac * (s1 - sm1
+                + frac * (2.0f * sm1 - 5.0f * s0 + 4.0f * s1 - s2
+                + frac * (3.0f * (s0 - s1) + s2 - sm1)));
 
         float sample = interpolated * velocity_ * env;
 

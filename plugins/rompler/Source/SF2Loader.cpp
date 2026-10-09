@@ -155,10 +155,21 @@ void SF2Loader::resampleToHostRate(Sample& sample)
         }
         else
         {
+            // Same 4-point Lagrange as the playback path so a font's high end
+            // survives the host-rate conversion instead of being smoothed.
             const float frac = phase - static_cast<float>(index);
-            const float s0 = sample.data[index];
-            const float s1 = sample.data[index + 1];
-            resampled[i] = s0 + frac * (s1 - s0);
+            const auto tap = [&] (std::int64_t j) noexcept
+            {
+                j = std::clamp (j, std::int64_t { 0 }, static_cast<std::int64_t> (sample.data.size()) - 1);
+                return sample.data[static_cast<std::size_t> (j)];
+            };
+            const float sm1 = tap (static_cast<std::int64_t> (index) - 1);
+            const float s0  = tap (static_cast<std::int64_t> (index));
+            const float s1  = tap (static_cast<std::int64_t> (index) + 1);
+            const float s2  = tap (static_cast<std::int64_t> (index) + 2);
+            resampled[i] = s0 + 0.5f * frac * (s1 - sm1
+                + frac * (2.0f * sm1 - 5.0f * s0 + 4.0f * s1 - s2
+                + frac * (3.0f * (s0 - s1) + s2 - sm1)));
         }
     }
 

@@ -33,6 +33,56 @@ float blockPeak (const float* output, int numSamples)
 }
 } // namespace
 
+TEST_CASE ("Lagrange playback interpolation tracks a pitched sine closely", "[dsp][voice]")
+{
+    // +7 semitones => playRate ~= 1.498, so nearly every output sample lands
+    // between stored frames. The reference is a second sample pre-synthesised
+    // at exactly the output frequency, played untransposed: its taps always
+    // land on integers, so any error it shares with the pitched voice
+    // (filter phase, drive curve, envelope) cancels and only the interpolation
+    // error remains. Linear lands near -49 dB here; Lagrange-4 clears -75 dB,
+    // so the bound separates the kernels with margin on both sides.
+    const double rate = std::pow (2.0, 7.0 / 12.0);
+
+    aod::Sample ref;
+    ref.data.resize (static_cast<std::size_t> (kSampleRate));
+    for (int i = 0; i < kSampleRate; ++i)
+        ref.data[static_cast<std::size_t> (i)] = std::sin (2.0f * 3.14159265f
+            * static_cast<float> (1000.0 * rate) * static_cast<float> (i)
+            / static_cast<float> (kSampleRate));
+    ref.sampleRate = kSampleRate;
+
+    const aod::Sample tone = makeTone();
+    aod::VoicePool pitched, reference;
+    pitched.start (&tone, 67, 1.0f);
+    reference.start (&ref, 60, 1.0f);
+
+    constexpr int blocks = 8;
+    double errSum = 0.0, refSum = 0.0;
+    for (int b = 0; b < blocks; ++b)
+    {
+        std::vector<float> outP (static_cast<std::size_t> (kBlockSize));
+        std::vector<float> outR (static_cast<std::size_t> (kBlockSize));
+        pitched.render (outP.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f,
+                        0.0f, 1.0f, 1.0f, 80.0f);
+        reference.render (outR.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f,
+                          0.0f, 1.0f, 1.0f, 80.0f);
+        if (b == 0)
+            continue; // let the filter settle
+        for (int i = 0; i < kBlockSize; ++i)
+        {
+            errSum += static_cast<double> (outP[static_cast<std::size_t> (i)]
+                                           - outR[static_cast<std::size_t> (i)])
+                    * static_cast<double> (outP[static_cast<std::size_t> (i)]
+                                           - outR[static_cast<std::size_t> (i)]);
+            refSum += static_cast<double> (outR[static_cast<std::size_t> (i)])
+                    * static_cast<double> (outR[static_cast<std::size_t> (i)]);
+        }
+    }
+    const double rmsErrDb = 10.0 * std::log10 ((errSum + 1e-12) / (refSum + 1e-12));
+    REQUIRE (rmsErrDb < -75.0);
+}
+
 TEST_CASE ("polyphone cap stops allocating voices past the limit", "[dsp][voice]")
 {
     aod::VoicePool pool;
