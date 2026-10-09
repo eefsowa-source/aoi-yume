@@ -2,6 +2,7 @@
 
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <x10/instrument/RegionIndex.h>
+#include <x10/instrument/Region.h>
 #include <x10/dsp/nonlinear/Curves.h>
 #include <x10/dsp/filter/TptSvf.h>
 #include <x10/dsp/envelope/Adsr.h>
@@ -23,6 +24,13 @@ struct Sample
     bool loopEnabled = false;
     float filterCutoffHz = 19912.13f;
     float filterResonanceDb = 0.0f;
+    // From the region: playback gain (dB below unity), and the hi-hat-style
+    // choke group. pan is parsed but ignored while the render path is mono.
+    float attenuationDb = 0.0f;
+    int exclusiveClass = 0;
+    // The region's own volume envelope; runs alongside the UI ADSR so a
+    // preset keeps its natural release tail under any panel setting.
+    x10::instrument::Envelope volumeEnvelope {};
     // Pitch mapping: the sample plays back untransposed when the played MIDI
     // note equals rootKey. tuneCents is a constant offset; scaleTuningCentsPerKey
     // is the per-key pitch step (100 = normal chromatic, 0 = pinned to rootKey).
@@ -44,6 +52,11 @@ public:
     [[nodiscard]] int note() const noexcept { return midiNote_; }
     /** How far the envelope has run; used to pick the oldest voice when stealing. */
     [[nodiscard]] float envPhase() const noexcept { return envPhase_; }
+    /** The sample's choke group, for exclusive-class voice cutting. */
+    [[nodiscard]] int exclusiveClass() const noexcept
+    {
+        return sample_ != nullptr ? sample_->exclusiveClass : 0;
+    }
 
     void render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
                 int curveId, int filterRouting, float filterOffsetCents,
@@ -58,6 +71,20 @@ private:
     float envPhase_ = 0.0f;
 
     x10::dsp::Adsr adsr_;
+    // Region volume envelope state, driven by the same noteOn/noteOff as the
+    // UI ADSR. Six linear stages (delay/attack/hold/decay/sustain/release).
+    enum class FontStage : std::uint8_t { delay, attack, hold, decay, sustain, release, idle };
+    FontStage fontStage_ = FontStage::idle;
+    float fontLevel_ = 0.0f;
+    float fontElapsedSec_ = 0.0f;
+    float fontReleaseFrom_ = 0.0f;
+    float fontInvRate_ = 1.0f / 48000.0f;
+    // Playback gain from the region's attenuation, folded in at start().
+    float gain_ = 1.0f;
+
+    void fontNoteOn() noexcept;
+    void fontNoteOff() noexcept;
+    [[nodiscard]] float fontTick() noexcept;
     // Bit-pattern hash of the last pushed envelope parameter block; see render()
     // for why we must not re-push identical values every block.
     std::uint32_t envParamHash_ = 0;

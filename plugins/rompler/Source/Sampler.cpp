@@ -33,7 +33,10 @@ void Voice::start(const Sample* sample, int midiNote, float velocity) noexcept
         + static_cast<double> (sample->tuneCents) / 100.0;
     playRate_ = std::pow (2.0, semitones / 12.0);
 
+    gain_ = std::pow (10.0f, -sample->attenuationDb / 20.0f);
+
     adsr_.noteOn();
+    fontNoteOn();
 }
 
 void Voice::stop() noexcept
@@ -41,11 +44,99 @@ void Voice::stop() noexcept
     if (!active_)
         return;
     adsr_.noteOff();
+    fontNoteOff();
 }
 
 bool Voice::isReleasing() const noexcept
 {
     return active_ && adsr_.stage() == x10::dsp::Adsr::Stage::Release;
+}
+
+void Voice::fontNoteOn() noexcept
+{
+    fontStage_ = FontStage::delay;
+    fontLevel_ = 0.0f;
+    fontElapsedSec_ = 0.0f;
+}
+
+void Voice::fontNoteOff() noexcept
+{
+    // Release starts from wherever the envelope currently is, and can re-enter
+    // release from release itself on a repeated noteOff.
+    if (fontStage_ == FontStage::idle)
+        return;
+    fontReleaseFrom_ = fontLevel_;
+    fontStage_ = FontStage::release;
+    fontElapsedSec_ = 0.0f;
+}
+
+float Voice::fontTick() noexcept
+{
+    const auto& e = sample_->volumeEnvelope;
+
+    switch (fontStage_)
+    {
+        case FontStage::delay:
+            fontLevel_ = 0.0f;
+            if ((fontElapsedSec_ += fontInvRate_) >= e.delaySeconds)
+            {
+                fontStage_ = FontStage::attack;
+                fontElapsedSec_ = 0.0f;
+            }
+            break;
+
+        case FontStage::attack:
+            fontLevel_ = e.attackSeconds > 0.0f
+                ? fontElapsedSec_ / e.attackSeconds : 1.0f;
+            if ((fontElapsedSec_ += fontInvRate_) >= e.attackSeconds)
+            {
+                fontLevel_ = 1.0f;
+                fontStage_ = FontStage::hold;
+                fontElapsedSec_ = 0.0f;
+            }
+            break;
+
+        case FontStage::hold:
+            fontLevel_ = 1.0f;
+            if ((fontElapsedSec_ += fontInvRate_) >= e.holdSeconds)
+            {
+                fontStage_ = FontStage::decay;
+                fontElapsedSec_ = 0.0f;
+            }
+            break;
+
+        case FontStage::decay:
+            fontLevel_ = e.decaySeconds > 0.0f
+                ? 1.0f + (e.sustainLevel - 1.0f) * (fontElapsedSec_ / e.decaySeconds)
+                : e.sustainLevel;
+            if ((fontElapsedSec_ += fontInvRate_) >= e.decaySeconds)
+            {
+                fontLevel_ = e.sustainLevel;
+                fontStage_ = FontStage::sustain;
+            }
+            break;
+
+        case FontStage::sustain:
+            fontLevel_ = e.sustainLevel;
+            break;
+
+        case FontStage::release:
+            fontLevel_ = e.releaseSeconds > 0.0f
+                ? fontReleaseFrom_ * (1.0f - fontElapsedSec_ / e.releaseSeconds)
+                : 0.0f;
+            if ((fontElapsedSec_ += fontInvRate_) >= e.releaseSeconds)
+            {
+                fontLevel_ = 0.0f;
+                fontStage_ = FontStage::idle;
+            }
+            break;
+
+        case FontStage::idle:
+            fontLevel_ = 0.0f;
+            break;
+    }
+
+    return fontLevel_;
 }
 
 void Voice::render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
@@ -65,6 +156,7 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
         // mid-Release every block would restart the ramp from the current
         // level, stretching what should be a fixed-time fade indefinitely.
         adsr_.prepare (static_cast<double> (hostSampleRate));
+        fontInvRate_ = 1.0f / static_cast<float> (hostSampleRate);
     }
 
     // Push ADSR parameters only on change: the setters recompute the current
@@ -114,8 +206,9 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
 
     for (int i = 0; i < numSamples; ++i)
     {
-        const float env = adsr_.tick();
-        if (env <= 0.0f && !adsr_.isActive())
+        const float fontEnv = fontTick();
+        const float env = adsr_.tick() * gain_ * fontEnv;
+        if ((env <= 0.0f && !adsr_.isActive()) || fontStage_ == FontStage::idle)
         {
             active_ = false;
             break;
@@ -228,6 +321,15 @@ void VoicePool::start(std::span<const Sample*> samples, int midiNote, float velo
     // voices from a wider old layer set must be released explicitly.
     for (std::size_t i = layerCount; i < reusableCount; ++i)
         reusable[i]->stop();
+
+    // Exclusive class (hi-hat choke): a new note in a non-zero group releases
+    // every still-sounding voice in that group. Runs before the layer loop so
+    // voices started by this call cannot choke one another.
+    for (std::size_t layer = 0; layer < layerCount; ++layer)
+        if (layers[layer]->exclusiveClass != 0)
+            for (auto& voice : voices_)
+                if (voice.isActive() && voice.exclusiveClass() == layers[layer]->exclusiveClass)
+                    voice.stop();
 
     for (std::size_t layer = 0; layer < layerCount; ++layer)
     {

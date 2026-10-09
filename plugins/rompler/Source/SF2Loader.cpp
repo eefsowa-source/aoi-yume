@@ -70,6 +70,9 @@ bool SF2Loader::loadFile(const juce::File& file)
             sample.rootKey = region.rootKey;
             sample.tuneCents = region.tuneCents;
             sample.scaleTuningCentsPerKey = region.scaleTuningCentsPerKey;
+            sample.attenuationDb = region.attenuationDb;
+            sample.exclusiveClass = region.exclusiveClass;
+            sample.volumeEnvelope = region.volumeEnvelope;
 
             resampleToHostRate(sample);
 

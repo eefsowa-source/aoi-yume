@@ -466,3 +466,70 @@ TEST_CASE ("release mid-attack keeps the fade slope continuous", "[dsp][voice]")
     // indicates a discontinuity (click) at the release point.
     REQUIRE (maxSlope < 0.5f);
 }
+
+TEST_CASE ("exclusive class chokes the earlier note in the same group", "[dsp][voice]")
+{
+    aod::VoicePool pool;
+    aod::Sample closed = makeTone();
+    aod::Sample open   = makeTone();
+    aod::Sample pad    = makeTone();
+    closed.exclusiveClass = 4;
+    open.exclusiveClass   = 4;
+    pad.exclusiveClass    = 7; // different group: must survive the choke
+
+    pool.start (&closed, 60, 0.5f);
+    pool.start (&pad,    72, 0.5f);
+    pool.start (&open,   62, 0.5f); // same class as note 60: chokes it
+
+    // Release whatever survived the choke and let both tails die. If note 60
+    // was not choked its sustain would still be sounding into these blocks.
+    pool.stop (62);
+    pool.stop (72);
+
+    std::vector<float> block (static_cast<std::size_t> (kBlockSize));
+    for (int b = 0; b < 32; ++b)
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
+
+    REQUIRE (blockPeak (block.data(), kBlockSize) <= 1.0e-6f);
+}
+
+TEST_CASE ("a short region release ends the note before the UI release", "[dsp][voice]")
+{
+    aod::VoicePool pool;
+    aod::Sample sample = makeTone();
+    // The region's own volume envelope wins when it ends sooner than the
+    // panel ADSR: a 20 ms font release under an 80 ms UI release truncates.
+    sample.volumeEnvelope.releaseSeconds = 0.02f;
+
+    pool.start (&sample, 60, 0.8f);
+    std::vector<float> block (static_cast<std::size_t> (kBlockSize));
+    pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
+    pool.stop (60);
+
+    // 20 ms at 48 kHz = 960 samples, under two blocks. Block 3 must be silent
+    // even though the UI release would still be fading.
+    for (int b = 0; b < 3; ++b)
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
+
+    REQUIRE (blockPeak (block.data(), kBlockSize) <= 1.0e-6f);
+}
+
+TEST_CASE ("region attenuation scales playback level", "[dsp][voice]")
+{
+    aod::VoicePool loud, quiet;
+    const aod::Sample flat = makeTone();
+    aod::Sample soft = makeTone();
+    soft.attenuationDb = 12.0f; // ~0.25x linear
+
+    std::vector<float> loudBlock (static_cast<std::size_t> (kBlockSize));
+    std::vector<float> softBlock (static_cast<std::size_t> (kBlockSize));
+    loud.start (&flat, 60, 0.8f);
+    quiet.start (&soft, 60, 0.8f);
+    loud.render  (loudBlock.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
+    quiet.render (softBlock.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
+
+    const float ratio = blockPeak (softBlock.data(), kBlockSize)
+                      / blockPeak (loudBlock.data(), kBlockSize);
+    REQUIRE (ratio > 0.15f);
+    REQUIRE (ratio < 0.35f);
+}
