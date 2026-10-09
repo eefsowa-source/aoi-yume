@@ -80,10 +80,13 @@ void RomplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     // Sync the oversampling factor at the block boundary, before any early
     // return: the reported latency must track the parameter even while no
     // SoundFont is loaded, so the host never sees a stale PDC figure when a
-    // font appears mid-session. The BusProcessor keeps all four oversamplers
-    // prepared, so switching here never allocates; only the reported latency
-    // moves, and setLatencySamples() itself no-ops while the value is
+    // font appears mid-session. The BusProcessor keeps all oversampling
+    // engines prepared, so switching here never allocates; only the reported
+    // latency moves, and setLatencySamples() itself no-ops while the value is
     // unchanged, so the host is notified exactly once per real factor change.
+    // shortcut: switching mid-playback applies stale filter state for one
+    // block and can click; if that becomes audible, gate the switch to the
+    // next prepareToPlay instead of crossfading inside process().
     {
         const auto osFactorParam = apvts_.getRawParameterValue (ParamIDs::busOsFactor);
         const int requestedOsIndex = osFactorParam ? static_cast<int> (osFactorParam->load()) : cachedOsFactorIndex_;
