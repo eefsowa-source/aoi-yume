@@ -200,30 +200,42 @@ void VoicePool::setPolyphony(int numVoices) noexcept
     polyphony_ = juce::jlimit (1, static_cast<int>(voices_.size()), numVoices);
 }
 
-void VoicePool::start(const Sample* sample, int midiNote, float velocity) noexcept
+void VoicePool::start(std::span<const Sample*> samples, int midiNote, float velocity) noexcept
 {
-    if (midiNote < 0 || midiNote >= 128)
+    if (midiNote < 0 || midiNote >= 128 || samples.empty())
         return;
 
-    // Retrigger: if this note already owns a voice, reset it in place instead
-    // of allocating a fresh slot. Without this, mashing one key consumes a new
-    // voice per press and the old voice keeps ringing underneath.
-    const int existing = noteToVoice_[static_cast<std::size_t>(midiNote)];
-    if (existing >= 0 && static_cast<std::size_t>(existing) < voices_.size()
-        && voices_[static_cast<std::size_t>(existing)].note() == midiNote
-        && voices_[static_cast<std::size_t>(existing)].isActive())
+    // Drop null layers up front so a mid-span hole cannot strand a reusable
+    // voice ringing a stale sample.
+    std::array<const Sample*, maxVoices> layers {};
+    std::size_t layerCount = 0;
+    for (auto* s : samples)
+        if (s != nullptr && layerCount < maxVoices)
+            layers[layerCount++] = s;
+    if (layerCount == 0)
+        return;
+
+    // Retrigger: voices already sounding this note are reused first, so
+    // re-pressing a layered note replaces its own voices instead of stacking
+    // a new set underneath the still-ringing old one.
+    std::array<Voice*, maxVoices> reusable {};
+    std::size_t reusableCount = 0;
+    for (auto& voice : voices_)
+        if (voice.isActive() && voice.note() == midiNote && reusableCount < maxVoices)
+            reusable[reusableCount++] = &voice;
+
+    // A note-off scan releases every voice of the note, so surplus reused
+    // voices from a wider old layer set must be released explicitly.
+    for (std::size_t i = layerCount; i < reusableCount; ++i)
+        reusable[i]->stop();
+
+    for (std::size_t layer = 0; layer < layerCount; ++layer)
     {
-        voices_[static_cast<std::size_t>(existing)].start (sample, midiNote, velocity);
-        return;
+        Voice* voice = layer < reusableCount ? reusable[layer] : findFreeVoice();
+        if (voice == nullptr)
+            return;
+        voice->start (layers[layer], midiNote, velocity);
     }
-
-    Voice* voice = findFreeVoice();
-    if (voice == nullptr)
-        return;
-
-    voice->start (sample, midiNote, velocity);
-    noteToVoice_[static_cast<std::size_t>(midiNote)] =
-        static_cast<int>(voice - voices_.data());
 }
 
 void VoicePool::stop(int midiNote) noexcept
@@ -231,13 +243,12 @@ void VoicePool::stop(int midiNote) noexcept
     if (midiNote < 0 || midiNote >= 128)
         return;
 
-    const int voiceIdx = noteToVoice_[static_cast<std::size_t>(midiNote)];
-    // Guard against a stale index: the slot may have been recycled for a
-    // different note since this note's note-off, so only release it if it is
-    // still actually sounding this note.
-    if (voiceIdx >= 0 && static_cast<std::size_t>(voiceIdx) < voices_.size()
-        && voices_[static_cast<std::size_t>(voiceIdx)].note() == midiNote)
-        voices_[static_cast<std::size_t>(voiceIdx)].stop();
+    // Every voice matching the note releases: velocity layers each own a
+    // voice, and recycled slots keep their current note so a stale index can
+    // never release the wrong sound.
+    for (auto& voice : voices_)
+        if (voice.note() == midiNote)
+            voice.stop();
 }
 
 void VoicePool::stopAll() noexcept

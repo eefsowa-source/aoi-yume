@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <vector>
 
 namespace aod
@@ -88,7 +89,18 @@ public:
     /** Caps the number of concurrently playing voices. Call from the audio thread. */
     void setPolyphony(int numVoices) noexcept;
 
-    void start(const Sample* sample, int midiNote, float velocity) noexcept;
+    /**
+        Starts one voice per matching sample (velocity layers, round robins).
+        Voices already sounding this note are retriggered in place first so a
+        re-pressed layered note does not stack stale releases underneath.
+    */
+    void start(std::span<const Sample*> samples, int midiNote, float velocity) noexcept;
+    /** Convenience: a single sample = one layer. */
+    void start(const Sample* sample, int midiNote, float velocity) noexcept
+    {
+        std::array<const Sample*, 1> one { sample };
+        start (std::span { one }, midiNote, velocity);
+    }
     void stop(int midiNote) noexcept;
     void stopAll() noexcept;
 
@@ -98,7 +110,6 @@ public:
 
 private:
     std::vector<Voice> voices_;
-    std::array<int, 128> noteToVoice_ {};
     int polyphony_ = static_cast<int>(voices_.size());
 
     [[nodiscard]] Voice* findFreeVoice() noexcept;

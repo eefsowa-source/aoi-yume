@@ -26,7 +26,7 @@ TEST_CASE ("SF2Loader loads a real bank and resolves a sample for note-on", "[sf
     REQUIRE (loader.presetCount() > 0);
 
     const auto [bank, program] = loader.firstPresetProgram();
-    aod::Sample* sample = loader.getSample (bank, program, 60, 100);
+    const aod::Sample* sample = loader.getSample (bank, program, 60, 100);
     REQUIRE (sample != nullptr);
     REQUIRE (! sample->data.empty());
 }
@@ -77,7 +77,7 @@ TEST_CASE ("pitch tracks the played MIDI note", "[sf2][pitch]")
     const auto [bank, program] = loader.firstPresetProgram();
 
     // Find a key that resolves a sample so we can measure its playback pitch.
-    aod::Sample* sample = nullptr;
+    const aod::Sample* sample = nullptr;
     for (int key = 0; key < 128; ++key)
     {
         sample = loader.getSample (bank, program, key, 100);
@@ -95,7 +95,7 @@ TEST_CASE ("pitch tracks the played MIDI note", "[sf2][pitch]")
     const int noteA = juce::jlimit (0, 115, static_cast<int> (std::lround (sample->rootKey)));
     const int noteB = noteA + 12;
 
-    auto zeroCrossings = [] (aod::Sample* s, int note, int blockSize)
+    auto zeroCrossings = [] (const aod::Sample* s, int note, int blockSize)
     {
         aod::VoicePool pool (1);
         pool.start (s, note, 100.0f / 127.0f);

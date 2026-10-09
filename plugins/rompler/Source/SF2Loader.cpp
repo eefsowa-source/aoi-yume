@@ -84,21 +84,33 @@ bool SF2Loader::loadFile(const juce::File& file)
     return true;
 }
 
-Sample* SF2Loader::getSample(int bank, int program, int key, int velocity) noexcept
+const Sample* SF2Loader::getSample(int bank, int program, int key, int velocity) noexcept
 {
-    if (!regionIndex_)
-        return nullptr;
+    std::array<const Sample*, 1> out {};
+    const auto found = getSamples (bank, program, key, velocity, out);
+    return found.empty() ? nullptr : found[0];
+}
 
-    std::array<const x10::instrument::Region*, 1> matches {};
-    const std::size_t matchCount = regionIndex_->match(
+std::span<const Sample*> SF2Loader::getSamples(int bank, int program, int key, int velocity,
+                                         std::span<const Sample*> out) noexcept
+{
+    if (!regionIndex_ || out.empty())
+        return out.subspan (0, 0);
+
+    // Region pointers first: unordered_map lookup per layer, so resolving a
+    // missing sample (region with empty data) costs one probe, not a note.
+    std::array<const x10::instrument::Region*, maxLayers> regions {};
+    const auto wanted = std::min (out.size(), regions.size());
+    const std::size_t matched = regionIndex_->match (
         static_cast<std::uint16_t>(bank), static_cast<std::uint16_t>(program),
-        key, velocity, matches);
+        key, velocity, std::span { regions.data(), wanted });
 
-    if (matchCount == 0)
-        return nullptr;
+    std::size_t written = 0;
+    for (std::size_t i = 0; i < std::min (matched, wanted); ++i)
+        if (auto it = samples_.find (regions[i]); it != samples_.end())
+            out[written++] = &it->second;
 
-    auto it = samples_.find(matches[0]);
-    return it != samples_.end() ? &it->second : nullptr;
+    return out.subspan (0, written);
 }
 
 std::pair<int, int> SF2Loader::firstPresetProgram() const noexcept

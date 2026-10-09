@@ -111,6 +111,41 @@ TEST_CASE ("Lagrange playback interpolation tracks a pitched sine closely", "[ds
     REQUIRE (rmsErrDb < -75.0);
 }
 
+TEST_CASE ("layered samples sound together and release together", "[dsp][voice]")
+{
+    // Two samples layered on one note: both must sound (vel layers /
+    // round robins) and a single note-off must release both voices.
+    aod::VoicePool pool;
+    aod::Sample a = makeTone(), b = makeTone();
+    for (auto& v : b.data)
+        v *= 0.5f;
+
+    std::array<const aod::Sample*, 2> layers { &a, &b };
+    pool.start (std::span { layers }, 60, 1.0f);
+
+    std::vector<float> layered (static_cast<std::size_t> (kBlockSize));
+    pool.render (layered.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f,
+                 0.0f, 1.0f, 1.0f, 80.0f);
+
+    aod::VoicePool solo;
+    solo.start (&a, 60, 1.0f);
+    std::vector<float> single (static_cast<std::size_t> (kBlockSize));
+    solo.render (single.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f,
+                 0.0f, 1.0f, 1.0f, 80.0f);
+
+    // The layered render must be louder than either single voice: the second
+    // layer adds energy, not a replacement.
+    REQUIRE (blockPeak (layered.data(), kBlockSize)
+           > blockPeak (single.data(), kBlockSize) * 1.3f);
+
+    // One note-off releases every layer.
+    pool.stop (60);
+    for (int b2 = 0; b2 < 64; ++b2)
+        pool.render (layered.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f,
+                     0.0f, 1.0f, 1.0f, 5.0f);
+    REQUIRE (blockPeak (layered.data(), kBlockSize) < 1e-4f);
+}
+
 TEST_CASE ("polyphone cap stops allocating voices past the limit", "[dsp][voice]")
 {
     aod::VoicePool pool;

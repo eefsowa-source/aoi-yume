@@ -117,8 +117,10 @@ void RomplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         {
             const int bank = currentBank_.load (std::memory_order_relaxed);
             const int program = currentProgram_.load (std::memory_order_relaxed);
-            if (Sample* sample = loader->getSample (bank, program, note, velocity))
-                voicePool_->start (sample, note, static_cast<float>(velocity) / 127.0f);
+            std::array<const Sample*, SF2Loader::maxLayers> samples {};
+            const auto matched = loader->getSamples (bank, program, note, velocity, samples);
+            if (! matched.empty())
+                voicePool_->start (matched, note, static_cast<float>(velocity) / 127.0f);
         }
         else
         {
@@ -136,10 +138,10 @@ void RomplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
             const int velocity = msg.getVelocity();
             const int bank = currentBank_.load (std::memory_order_relaxed);
             const int program = currentProgram_.load (std::memory_order_relaxed);
-            Sample* sample = loader->getSample(bank, program, note, velocity);
-
-            if (sample != nullptr)
-                voicePool_->start(sample, note, static_cast<float>(velocity) / 127.0f);
+            std::array<const Sample*, SF2Loader::maxLayers> samples {};
+            const auto matched = loader->getSamples (bank, program, note, velocity, samples);
+            if (! matched.empty())
+                voicePool_->start (matched, note, static_cast<float>(velocity) / 127.0f);
         }
         else if (msg.isNoteOff())
         {

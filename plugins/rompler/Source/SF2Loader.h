@@ -6,6 +6,7 @@
 #include <x10/instrument/RegionIndex.h>
 #include <juce_core/juce_core.h>
 #include <memory>
+#include <span>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -20,8 +21,20 @@ public:
 
     bool loadFile(const juce::File& file);
 
+    /** Max velocity layers/round robins resolved per note-on. */
+    static constexpr int maxLayers = 8;
+
     /** Returns nullptr if no matching region/sample was found. */
-    [[nodiscard]] Sample* getSample(int bank, int program, int key, int velocity) noexcept;
+    [[nodiscard]] const Sample* getSample(int bank, int program, int key, int velocity) noexcept;
+
+    /**
+        Fills @p out with every sample matching (bank, program, key, velocity)
+        — velocity layers and round robins all sound together. Returns the
+        subspan actually written. noexcept and allocation-free, safe on the
+        audio thread.
+    */
+    [[nodiscard]] std::span<const Sample*> getSamples(int bank, int program, int key, int velocity,
+                                                std::span<const Sample*> out) noexcept;
 
     /** (bank, program) of preset 0 in load order, or {0, 0} if nothing loaded. */
     [[nodiscard]] std::pair<int, int> firstPresetProgram() const noexcept;
