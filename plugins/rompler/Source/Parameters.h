@@ -42,7 +42,9 @@ namespace Choices
 {
 inline const juce::StringArray curve       { "Tanh", "Tube", "Transformer" };
 inline const juce::StringArray filterRouting { "Pre", "Post" };
-inline const juce::StringArray osFactor    { "1x", "2x", "4x", "8x" };
+    // The FIR entries reuse the same indices as a new choice rather than a new
+    // parameter so saved sessions keep their stored index.
+    inline const juce::StringArray osFactor    { "1x", "2x", "4x", "8x", "2x FIR", "4x FIR", "8x FIR" };
 } // namespace Choices
 
 [[nodiscard]] inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout()

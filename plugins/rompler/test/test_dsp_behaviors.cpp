@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "Sampler.h"
+#include "BusProcessor.h"
 
 namespace
 {
@@ -32,6 +33,33 @@ float blockPeak (const float* output, int numSamples)
     return peak;
 }
 } // namespace
+
+TEST_CASE ("FIR oversampling path reports latency and passes audio", "[dsp][bus]")
+{
+    aod::BusProcessor bus;
+    bus.prepare (kSampleRate, kBlockSize, 1);
+
+    // Round-trip latency = (L-1) * (1 - 2^-factor) input-rate samples.
+    REQUIRE (bus.getLatencySamples (0) == 0);   // 1x
+    REQUIRE (bus.getLatencySamples (4) == 63);  // 2x FIR: 126 * 0.5
+    REQUIRE (bus.getLatencySamples (5) == 95);  // 4x FIR: 126 * 0.75 -> 94.5 -> 95
+    REQUIRE (bus.getLatencySamples (6) == 110); // 8x FIR: 126 * 0.875 -> 110.25
+
+    // Neutral settings (no drive, no fold): output should be a delayed copy of
+    // the input sine, not silence and not garbage.
+    juce::AudioBuffer<float> in (1, kBlockSize), out (1, kBlockSize);
+    for (int i = 0; i < kBlockSize; ++i)
+        in.setSample (0, i, 0.25f * std::sin (2.0f * 3.14159265f * 1000.0f
+                                              * static_cast<float> (i) / kSampleRate));
+    out.copyFrom (0, 0, in, 0, 0, kBlockSize);
+    bus.process (out, 0.0f, 0.0f, 4);
+
+    float peak = 0.0f;
+    for (int i = 0; i < kBlockSize; ++i)
+        peak = std::max (peak, std::abs (out.getSample (0, i)));
+    REQUIRE (peak > 0.05f);   // FIR tail of the first block still carries signal
+    REQUIRE (peak < 0.6f);    // but stays bounded
+}
 
 TEST_CASE ("Lagrange playback interpolation tracks a pitched sine closely", "[dsp][voice]")
 {

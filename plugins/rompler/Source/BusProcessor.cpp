@@ -14,6 +14,8 @@ void BusProcessor::prepare (double sampleRate, int maximumBlockSize, int numChan
         oversamplers_[static_cast<std::size_t> (factor)]->initProcessing (static_cast<std::size_t> (maximumBlockSize));
     }
 
+    firOversampler_.prepare (maximumBlockSize, numChannels);
+
     dcBlockers_.assign (static_cast<std::size_t> (numChannels), x10::dsp::DCBlocker{});
     for (auto& blocker : dcBlockers_)
         blocker.prepare (sampleRate);
@@ -21,7 +23,9 @@ void BusProcessor::prepare (double sampleRate, int maximumBlockSize, int numChan
 
 int BusProcessor::getLatencySamples (int osFactorIndex) const noexcept
 {
-    osFactorIndex = juce::jlimit (0, numFactors - 1, osFactorIndex);
+    osFactorIndex = juce::jlimit (0, numChoices - 1, osFactorIndex);
+    if (osFactorIndex >= numFactors)
+        return static_cast<int> (std::lround (FirOversampler::getLatencyInSamples (osFactorIndex - numFactors + 1)));
     const auto& os = oversamplers_[static_cast<std::size_t> (osFactorIndex)];
     return os ? static_cast<int> (std::lround (os->getLatencyInSamples())) : 0;
 }
@@ -31,6 +35,7 @@ void BusProcessor::reset()
     for (auto& os : oversamplers_)
         if (os)
             os->reset();
+    firOversampler_.reset();
     for (auto& blocker : dcBlockers_)
         blocker.reset();
 }
@@ -47,11 +52,13 @@ float BusProcessor::foldSample (float x, float amount) noexcept
 void BusProcessor::process (juce::AudioBuffer<float>& buffer, float tapeDrivePercent, float foldPercent,
                              int osFactorIndex) noexcept
 {
-    osFactorIndex = juce::jlimit (0, numFactors - 1, osFactorIndex);
-    auto& oversampler = *oversamplers_[static_cast<std::size_t> (osFactorIndex)];
+    osFactorIndex = juce::jlimit (0, numChoices - 1, osFactorIndex);
 
     juce::dsp::AudioBlock<float> block (buffer);
-    auto oversampledBlock = oversampler.processSamplesUp (block);
+    const bool fir = osFactorIndex >= numFactors;
+    auto oversampledBlock = fir
+        ? firOversampler_.processSamplesUp (block, osFactorIndex - numFactors + 1)
+        : oversamplers_[static_cast<std::size_t> (osFactorIndex)]->processSamplesUp (block);
 
     const float driveAmount = tapeDrivePercent / 100.0f;
     const float driveGain = 1.0f + driveAmount * 4.0f;
@@ -78,7 +85,10 @@ void BusProcessor::process (juce::AudioBuffer<float>& buffer, float tapeDrivePer
         }
     }
 
-    oversampler.processSamplesDown (block);
+    if (fir)
+        firOversampler_.processSamplesDown (block);
+    else
+        oversamplers_[static_cast<std::size_t> (osFactorIndex)]->processSamplesDown (block);
 }
 
 } // namespace aod

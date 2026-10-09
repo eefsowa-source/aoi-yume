@@ -6,6 +6,8 @@
 #include <array>
 #include <memory>
 
+#include "FirOversampler.h"
+
 namespace aod
 {
 
@@ -13,11 +15,12 @@ namespace aod
     Master bus nonlinear stage: tape-style saturation, then a wavefolder,
     both run inside an oversampled block to keep their aliasing under control.
 
-    Oversampling factor is chosen per block from the Oversampling parameter
-    (1x/2x/4x/8x). All four juce::dsp::Oversampling instances are built once in
-    prepare() so switching factors mid-stream never allocates on the audio
-    thread; only the host latency notification changes, and only when the
-    factor actually changes.
+    Oversampling factor is chosen per block from the Oversampling parameter.
+    Choices 0-3 (1x/2x/4x/8x) run JUCE's halfband polyphase IIR; choices 4-6
+    (2x/4x/8x FIR) run the linear-phase least-squares halfband in
+    FirOversampler. All engines are built once in prepare() so switching
+    factors mid-stream never allocates on the audio thread; only the host
+    latency notification changes, and only when the factor actually changes.
 */
 class BusProcessor
 {
@@ -27,7 +30,7 @@ public:
 
     /**
         tapeDrivePercent, foldPercent: 0-100, straight from APVTS.
-        osFactorIndex: 0=1x, 1=2x, 2=4x, 3=8x.
+        osFactorIndex: 0=1x, 1=2x, 2=4x, 3=8x (IIR), 4=2x, 5=4x, 6=8x (FIR).
 
         The oversampling factor is fixed for the lifetime of a prepareToPlay
         session: reading it here would mean a possible mid-block change in
@@ -43,9 +46,11 @@ public:
     [[nodiscard]] int getLatencySamples (int osFactorIndex) const noexcept;
 
 private:
-    static constexpr int numFactors = 4;
+    static constexpr int numFactors = 4;       // IIR choices 0..3
+    static constexpr int numChoices = 7;       // total Oversampling choices
 
     std::array<std::unique_ptr<juce::dsp::Oversampling<float>>, numFactors> oversamplers_;
+    FirOversampler firOversampler_;
     std::vector<x10::dsp::DCBlocker> dcBlockers_;
 
     [[nodiscard]] static float foldSample (float x, float amount) noexcept;
