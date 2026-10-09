@@ -164,6 +164,19 @@ void SF2Loader::resampleToHostRate(Sample& sample)
 
     sample.data = std::move(resampled);
     sample.sampleRate = hostSampleRate_;
+
+    // Loop points were clamped against the *source* buffer in loadFile(); the
+    // resampled buffer is a different length, so rescale and re-clamp or the
+    // voice loop wraps outside the data (out-of-bounds reads when the host
+    // rate is lower than the source rate).
+    sample.loopStart = static_cast<int> (static_cast<float> (sample.loopStart) * ratio);
+    sample.loopEnd   = static_cast<int> (static_cast<float> (sample.loopEnd) * ratio);
+    if (sample.data.size() >= 2)
+    {
+        const auto maxFrame = static_cast<int> (sample.data.size() - 1);
+        sample.loopEnd   = std::min (sample.loopEnd, maxFrame);
+        sample.loopStart = std::min (sample.loopStart, maxFrame - 1);
+    }
 }
 
 } // namespace aod

@@ -253,9 +253,13 @@ Voice* VoicePool::findFreeVoice() noexcept
     // (Voice::start() rewrites all state, so the steal is click-free apart
     // from the natural note cut.)
     std::size_t oldest = 0;
-    for (std::size_t i = 1; i < limit; ++i)
-        if (voices_[i].isActive())
+    float oldestPhase = -1.0f;
+    for (std::size_t i = 0; i < limit; ++i)
+        if (voices_[i].isActive() && voices_[i].envPhase() > oldestPhase)
+        {
             oldest = i;
+            oldestPhase = voices_[i].envPhase();
+        }
     return &voices_[oldest];
 }
 

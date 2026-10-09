@@ -52,6 +52,11 @@ void RomplerProcessor::releaseResources()
             retiredLoaders_.push_back (std::move (slot));
     }
 
+    // The audio thread is stopped and every loader has been retired, so the
+    // deferred-free list can finally be drained here instead of growing until
+    // the plugin instance is destroyed.
+    retiredLoaders_.clear();
+
     bundledFontLoaded_ = false;
     voicePool_.reset();
 }
@@ -97,16 +102,14 @@ void RomplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     const int numSamples = buffer.getNumSamples();
 
     // Drain UI / computer-keyboard note events first (message thread).
-    std::queue<std::tuple<int, bool, int>> uiNotes;
+    for (;;)
     {
-        const std::lock_guard lock (noteQueueMutex_);
-        uiNotes = std::move (noteQueue_);
-        noteQueue_ = {};
-    }
-    while (!uiNotes.empty())
-    {
-        const auto [note, on, velocity] = uiNotes.front();
-        uiNotes.pop();
+        int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
+        noteFifo_.prepareToRead (1, start1, size1, start2, size2);
+        if (size1 <= 0)
+            break;
+        const auto [note, on, velocity] = noteBuffer_[static_cast<std::size_t> (start1)];
+        noteFifo_.finishedRead (1);
         if (on)
         {
             const int bank = currentBank_.load (std::memory_order_relaxed);
@@ -144,6 +147,10 @@ void RomplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         {
             currentProgram_.store (msg.getProgramChangeNumber(), std::memory_order_relaxed);
         }
+        else if (msg.isAllNotesOff() || msg.isAllSoundOff())
+        {
+            voicePool_->stopAll();
+        }
     }
 
     const auto driveParam = apvts_.getRawParameterValue(ParamIDs::voiceDrive);
@@ -161,8 +168,18 @@ void RomplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     if (polyLimitParam)
         voicePool_->setPolyphony (static_cast<int> (polyLimitParam->load()));
 
+    const auto envAttackParam  = apvts_.getRawParameterValue (ParamIDs::envAttack);
+    const auto envDecayParam   = apvts_.getRawParameterValue (ParamIDs::envDecay);
+    const auto envSustainParam = apvts_.getRawParameterValue (ParamIDs::envSustain);
+    const auto envReleaseParam = apvts_.getRawParameterValue (ParamIDs::envRelease);
+    const float attackMs     = envAttackParam  ? envAttackParam->load()          : 10.0f;
+    const float decayMs      = envDecayParam   ? envDecayParam->load()           : 300.0f;
+    const float sustainLevel = envSustainParam ? envSustainParam->load() / 100.0f : 0.7f;
+    const float releaseMs    = envReleaseParam ? envReleaseParam->load()         : 80.0f;
+
     voicePool_->render(outL, numSamples, static_cast<int>(sampleRate_), driveDb, velToDriveDb,
-                        curveId, filterRouting, filterOffsetCents);
+                        curveId, filterRouting, filterOffsetCents,
+                        attackMs, decayMs, sustainLevel, releaseMs);
 
     if (buffer.getNumChannels() > 1)
     {
@@ -224,6 +241,7 @@ void RomplerProcessor::getStateInformation (juce::MemoryBlock& destData)
         auto* slotXml = banksXml->createNewChildElement ("Slot");
         slotXml->setAttribute ("index", i);
         slotXml->setAttribute ("file", bankNames_[static_cast<std::size_t> (i)]);
+        slotXml->setAttribute ("path", bankPaths_[static_cast<std::size_t> (i)]);
     }
 
     copyXmlToBinary (*xml, destData);
@@ -243,10 +261,15 @@ void RomplerProcessor::setStateInformation (const void* data, int sizeInBytes)
     if (auto* banksXml = xml->getChildByName ("Banks"))
     {
         const int activeSlot = banksXml->getIntAttribute ("activeSlot", 0);
-        for (auto* slotXml : banksXml->getChildIterator ("Slot"))
+        for (auto* slotXml : banksXml->getChildIterator())
         {
+            if (! slotXml->hasTagName ("Slot"))
+                continue;
             const int idx = slotXml->getIntAttribute ("index", -1);
-            const auto fileName = slotXml->getStringAttribute ("file", {});
+            // Prefer the full path; fall back to the legacy filename attribute
+            // which only ever resolves when the host's CWD happens to match.
+            const auto fileName = slotXml->getStringAttribute ("path",
+                                  slotXml->getStringAttribute ("file", {}));
             if (idx >= 0 && idx < maxBanks && fileName.isNotEmpty())
             {
                 const juce::File file (fileName);
@@ -273,6 +296,7 @@ void RomplerProcessor::loadSoundFont(const juce::File& file, int bankSlot)
         return;
 
     bankNames_[static_cast<std::size_t> (bankSlot)] = file.getFileName();
+    bankPaths_[static_cast<std::size_t> (bankSlot)] = file.getFullPathName();
 
     // If this is the active slot, update currentBank/currentProgram and publish.
     if (bankSlot == activeBankSlot_.load (std::memory_order_relaxed))
@@ -308,6 +332,7 @@ void RomplerProcessor::removeBank(int bankSlot)
         retiredLoaders_.push_back (std::move (slot));
     }
     bankNames_[static_cast<std::size_t> (bankSlot)] = {};
+    bankPaths_[static_cast<std::size_t> (bankSlot)] = {};
 }
 
 void RomplerProcessor::switchBank(int bankSlot)
@@ -421,15 +446,17 @@ void RomplerProcessor::selectPreset (int bank, int program) noexcept
 
 void RomplerProcessor::postNote (int note, bool on, int velocity)
 {
-    const std::lock_guard lock (noteQueueMutex_);
-
     // When the queue is full we drop the *new* event rather than the oldest.
     // Dropping the oldest strands a note-on without its matching note-off (or
     // vice versa): a lost note-on leaves the note silent, but a lost note-off
     // leaves it ringing forever. Both are dropped symmetrically here, so the
     // worst case is a momentarily missed keypress, never a stuck note.
-    if (noteQueue_.size() < maxQueuedNotes)
-        noteQueue_.push ({ note, on, velocity });
+    int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
+    noteFifo_.prepareToWrite (1, start1, size1, start2, size2);
+    if (size1 <= 0)
+        return;
+    noteBuffer_[static_cast<std::size_t> (start1)] = { note, on, velocity };
+    noteFifo_.finishedWrite (1);
 }
 
 } // namespace aod

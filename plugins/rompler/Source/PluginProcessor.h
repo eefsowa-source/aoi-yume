@@ -1,9 +1,8 @@
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <juce_core/juce_core.h>
 #include <atomic>
-#include <queue>
-#include <mutex>
 #include <tuple>
 
 #include "Parameters.h"
@@ -34,7 +33,7 @@ public:
     bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
-    double getTailLengthSeconds() const override { return 4.0; }
+    double getTailLengthSeconds() const override { return 8.0; }
 
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
@@ -121,6 +120,10 @@ private:
     // activeLoader_ always points to the active slot's loader for the audio thread.
     std::array<std::unique_ptr<SF2Loader>, maxBanks> sf2Loaders_;
     std::array<juce::String, maxBanks> bankNames_;
+    // Full paths of the loaded banks, for session state. bankNames_ holds the
+    // display name only; restoring from a bare filename fails because hosts do
+    // not share our working directory.
+    std::array<juce::String, maxBanks> bankPaths_;
     std::atomic<int> activeBankSlot_ { 0 };
     std::atomic<SF2Loader*> activeLoader_ { nullptr };
     std::vector<std::unique_ptr<SF2Loader>> retiredLoaders_;
@@ -137,10 +140,13 @@ private:
     /** Set once the bundled font has been offered up; see loadBundledSoundFont(). */
     bool bundledFontLoaded_ = false;
 
-    // Message-thread -> audio-thread note events. Bounded; if the host is not
-    // running we drop rather than grow unbounded.
-    std::queue<std::tuple<int, bool, int>> noteQueue_;
-    std::mutex noteQueueMutex_;
+    // Message-thread -> audio-thread note events. SPSC via AbstractFifo so
+    // processBlock never takes a lock; producers must all run on the message
+    // thread. shortcut: single producer assumed — if a second writer ever
+    // appears (e.g. an extra MIDI-in component), move writes behind one
+    // aggregator or switch to a lock-free MPMC queue.
+    juce::AbstractFifo noteFifo_ { maxQueuedNotes };
+    std::array<std::tuple<int, bool, int>, maxQueuedNotes> noteBuffer_ {};
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RomplerProcessor)
 };
