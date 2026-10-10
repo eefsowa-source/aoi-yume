@@ -59,6 +59,14 @@ TEST_CASE ("FIR oversampling path reports latency and passes audio", "[dsp][bus]
         peak = std::max (peak, std::abs (out.getSample (0, i)));
     REQUIRE (peak > 0.05f);   // FIR tail of the first block still carries signal
     REQUIRE (peak < 0.6f);    // but stays bounded
+
+    // Round-trip fidelity: a passband tone must come back as a pure 63-sample
+    // delay of itself. A wrong history index still passes audio above but
+    // shifts or scrambles the copy (an off-by-one in the delay line moves the
+    // error to ~0.03 at this level). Skip the startup transient where the
+    // zero-filled history is still ringing in.
+    for (int i = 192; i < kBlockSize; ++i)
+        REQUIRE (std::abs (out.getSample (0, i) - in.getSample (0, i - 63)) < 1.0e-3f);
 }
 
 TEST_CASE ("Lagrange playback interpolation tracks a pitched sine closely", "[dsp][voice]")
