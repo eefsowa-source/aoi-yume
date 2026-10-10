@@ -94,9 +94,13 @@ private:
     {
         juce::AudioBuffer<float> level;
         juce::dsp::AudioBlock<float> levelBlock;  // rebound lazily in upStage
-        std::vector<std::array<float, halfband::kEvenTaps>> upHist;
-        std::vector<std::array<float, halfband::kEvenTaps>> downEven;
-        std::vector<std::array<float, halfband::kEvenTaps>> downOdd;
+        // Each history line is twice the tap count: every write is mirrored
+        // at pos and pos + kEvenTaps, so a 64-tap convolution always reads one
+        // contiguous ascending run and the compiler can vectorise it. The
+        // extra store costs far less than the per-tap & 63 masking did.
+        std::vector<std::array<float, halfband::kEvenTaps * 2>> upHist;
+        std::vector<std::array<float, halfband::kEvenTaps * 2>> downEven;
+        std::vector<std::array<float, halfband::kEvenTaps * 2>> downOdd;
         std::vector<int> pos;
     };
 
@@ -116,18 +120,18 @@ private:
 
             for (std::size_t n = 0; n < numSamples; ++n)
             {
-                hist[static_cast<std::size_t> (pos)] = src[n];
+                hist[static_cast<std::size_t> (pos)] = hist[static_cast<std::size_t> (pos + halfband::kEvenTaps)] = src[n];
                 pos = (pos + 1) & 63;
 
                 float even = 0.0f;
                 for (int j = 0; j < halfband::kEvenTaps; ++j)
-                    even += halfband::kEven[static_cast<std::size_t> (j)]
-                          * hist[static_cast<std::size_t> ((pos - 1 - j) & 63)];
+                    even += halfband::kEven[static_cast<std::size_t> (halfband::kEvenTaps - 1 - j)]
+                          * hist[static_cast<std::size_t> (pos + j)];
 
                 // Polyphase: y[2n] is the even-tap convolution (x2 gain folded
                 // in), y[2n+1] is the centre tap = a pure 31-sample delay.
                 dst[n * 2]     = 2.0f * even;
-                dst[n * 2 + 1] = hist[static_cast<std::size_t> ((pos - 32) & 63)];
+                dst[n * 2 + 1] = hist[static_cast<std::size_t> (pos + 32)];
             }
             st.pos[ch] = pos;
         }
@@ -150,18 +154,18 @@ private:
 
             for (std::size_t n = 0; n < numSamples; ++n)
             {
-                ev[static_cast<std::size_t> (pos)] = src[n * 2];
-                od[static_cast<std::size_t> (pos)] = src[n * 2 + 1];
+                ev[static_cast<std::size_t> (pos)] = ev[static_cast<std::size_t> (pos + halfband::kEvenTaps)] = src[n * 2];
+                od[static_cast<std::size_t> (pos)] = od[static_cast<std::size_t> (pos + halfband::kEvenTaps)] = src[n * 2 + 1];
                 pos = (pos + 1) & 63;
 
                 float even = 0.0f;
                 for (int j = 0; j < halfband::kEvenTaps; ++j)
-                    even += halfband::kEven[static_cast<std::size_t> (j)]
-                          * ev[static_cast<std::size_t> ((pos - 1 - j) & 63)];
+                    even += halfband::kEven[static_cast<std::size_t> (halfband::kEvenTaps - 1 - j)]
+                          * ev[static_cast<std::size_t> (pos + j)];
 
                 // Odd phase reduces to h[63] = 0.5 acting on w[2n-63], which is
                 // the odd sample 32 positions back in odd-sample indexing.
-                dst[n] = even + 0.5f * od[static_cast<std::size_t> ((pos - 33) & 63)];
+                dst[n] = even + 0.5f * od[static_cast<std::size_t> (pos + 31)];
             }
             st.pos[ch] = pos;
         }
