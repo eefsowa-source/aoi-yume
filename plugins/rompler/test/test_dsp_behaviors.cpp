@@ -541,3 +541,48 @@ TEST_CASE ("region attenuation scales playback level", "[dsp][voice]")
     REQUIRE (ratio > 0.15f);
     REQUIRE (ratio < 0.35f);
 }
+
+TEST_CASE ("mod envelope to filter opens a closed lowpass", "[dsp][voice]")
+{
+    aod::VoicePool closed, opened;
+    const aod::Sample base = makeTone();
+    aod::Sample modded = makeTone();
+    // 200 Hz lowpass on a 1 kHz tone kills the signal; +4800 cents of mod
+    // envelope at sustain sweeps the cutoff to ~3.2 kHz and lets it through.
+    modded.filterCutoffHz = 200.0f;
+    modded.modEnvToFilterCents = 4800.0f;
+    aod::Sample shut = base;
+    shut.filterCutoffHz = 200.0f;
+
+    std::vector<float> a (static_cast<std::size_t> (kBlockSize));
+    std::vector<float> b (static_cast<std::size_t> (kBlockSize));
+    closed.start (&shut, 60, 0.8f);
+    opened.start (&modded, 60, 0.8f);
+    closed.render (a.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
+    opened.render (b.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
+
+    REQUIRE (blockPeak (b.data(), kBlockSize) > blockPeak (a.data(), kBlockSize) * 4.0f);
+}
+
+TEST_CASE ("mod envelope to pitch doubles the cycle rate at sustain", "[dsp][voice]")
+{
+    aod::VoicePool flat, shifted;
+    const aod::Sample base = makeTone();
+    aod::Sample modded = makeTone();
+    modded.modEnvToPitchCents = 1200.0f; // +1 octave once the envelope sustains
+
+    const auto crossings = [] (aod::VoicePool& pool, const aod::Sample* s)
+    {
+        pool.start (s, 60, 0.8f);
+        std::vector<float> block (static_cast<std::size_t> (kBlockSize));
+        pool.render (block.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f);
+        int n = 0;
+        for (int i = 1; i < kBlockSize; ++i)
+            if ((block[static_cast<std::size_t> (i)] >= 0.0f)
+                != (block[static_cast<std::size_t> (i - 1)] >= 0.0f))
+                ++n;
+        return n;
+    };
+
+    REQUIRE (crossings (shifted, &modded) > static_cast<int> (crossings (flat, &base) * 1.5f));
+}

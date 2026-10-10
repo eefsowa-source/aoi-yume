@@ -36,7 +36,8 @@ void Voice::start(const Sample* sample, int midiNote, float velocity) noexcept
     gain_ = std::pow (10.0f, -sample->attenuationDb / 20.0f);
 
     adsr_.noteOn();
-    fontNoteOn();
+    volEnv_.noteOn();
+    modEnv_.noteOn();
 }
 
 void Voice::stop() noexcept
@@ -44,7 +45,8 @@ void Voice::stop() noexcept
     if (!active_)
         return;
     adsr_.noteOff();
-    fontNoteOff();
+    volEnv_.noteOff();
+    modEnv_.noteOff();
 }
 
 bool Voice::isReleasing() const noexcept
@@ -52,91 +54,89 @@ bool Voice::isReleasing() const noexcept
     return active_ && adsr_.stage() == x10::dsp::Adsr::Stage::Release;
 }
 
-void Voice::fontNoteOn() noexcept
+void Voice::StageEnv::noteOn() noexcept
 {
-    fontStage_ = FontStage::delay;
-    fontLevel_ = 0.0f;
-    fontElapsedSec_ = 0.0f;
+    stage = Stage::delay;
+    level = 0.0f;
+    elapsedSec = 0.0f;
 }
 
-void Voice::fontNoteOff() noexcept
+void Voice::StageEnv::noteOff() noexcept
 {
     // Release starts from wherever the envelope currently is, and can re-enter
     // release from release itself on a repeated noteOff.
-    if (fontStage_ == FontStage::idle)
+    if (stage == Stage::idle)
         return;
-    fontReleaseFrom_ = fontLevel_;
-    fontStage_ = FontStage::release;
-    fontElapsedSec_ = 0.0f;
+    releaseFrom = level;
+    stage = Stage::release;
+    elapsedSec = 0.0f;
 }
 
-float Voice::fontTick() noexcept
+float Voice::StageEnv::tick (const x10::instrument::Envelope& e, float invRate) noexcept
 {
-    const auto& e = sample_->volumeEnvelope;
-
-    switch (fontStage_)
+    switch (stage)
     {
-        case FontStage::delay:
-            fontLevel_ = 0.0f;
-            if ((fontElapsedSec_ += fontInvRate_) >= e.delaySeconds)
+        case Stage::delay:
+            level = 0.0f;
+            if ((elapsedSec += invRate) >= e.delaySeconds)
             {
-                fontStage_ = FontStage::attack;
-                fontElapsedSec_ = 0.0f;
+                stage = Stage::attack;
+                elapsedSec = 0.0f;
             }
             break;
 
-        case FontStage::attack:
-            fontLevel_ = e.attackSeconds > 0.0f
-                ? fontElapsedSec_ / e.attackSeconds : 1.0f;
-            if ((fontElapsedSec_ += fontInvRate_) >= e.attackSeconds)
+        case Stage::attack:
+            level = e.attackSeconds > 0.0f
+                ? elapsedSec / e.attackSeconds : 1.0f;
+            if ((elapsedSec += invRate) >= e.attackSeconds)
             {
-                fontLevel_ = 1.0f;
-                fontStage_ = FontStage::hold;
-                fontElapsedSec_ = 0.0f;
+                level = 1.0f;
+                stage = Stage::hold;
+                elapsedSec = 0.0f;
             }
             break;
 
-        case FontStage::hold:
-            fontLevel_ = 1.0f;
-            if ((fontElapsedSec_ += fontInvRate_) >= e.holdSeconds)
+        case Stage::hold:
+            level = 1.0f;
+            if ((elapsedSec += invRate) >= e.holdSeconds)
             {
-                fontStage_ = FontStage::decay;
-                fontElapsedSec_ = 0.0f;
+                stage = Stage::decay;
+                elapsedSec = 0.0f;
             }
             break;
 
-        case FontStage::decay:
-            fontLevel_ = e.decaySeconds > 0.0f
-                ? 1.0f + (e.sustainLevel - 1.0f) * (fontElapsedSec_ / e.decaySeconds)
+        case Stage::decay:
+            level = e.decaySeconds > 0.0f
+                ? 1.0f + (e.sustainLevel - 1.0f) * (elapsedSec / e.decaySeconds)
                 : e.sustainLevel;
-            if ((fontElapsedSec_ += fontInvRate_) >= e.decaySeconds)
+            if ((elapsedSec += invRate) >= e.decaySeconds)
             {
-                fontLevel_ = e.sustainLevel;
-                fontStage_ = FontStage::sustain;
+                level = e.sustainLevel;
+                stage = Stage::sustain;
             }
             break;
 
-        case FontStage::sustain:
-            fontLevel_ = e.sustainLevel;
+        case Stage::sustain:
+            level = e.sustainLevel;
             break;
 
-        case FontStage::release:
-            fontLevel_ = e.releaseSeconds > 0.0f
-                ? fontReleaseFrom_ * (1.0f - fontElapsedSec_ / e.releaseSeconds)
+        case Stage::release:
+            level = e.releaseSeconds > 0.0f
+                ? releaseFrom * (1.0f - elapsedSec / e.releaseSeconds)
                 : 0.0f;
-            if ((fontElapsedSec_ += fontInvRate_) >= e.releaseSeconds)
+            if ((elapsedSec += invRate) >= e.releaseSeconds)
             {
-                fontLevel_ = 0.0f;
-                fontStage_ = FontStage::idle;
+                level = 0.0f;
+                stage = Stage::idle;
             }
             break;
 
-        case FontStage::idle:
-            fontLevel_ = 0.0f;
+        case Stage::idle:
+            level = 0.0f;
             break;
     }
 
-    return fontLevel_;
+    return level;
 }
 
 void Voice::render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
@@ -156,7 +156,7 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
         // mid-Release every block would restart the ramp from the current
         // level, stretching what should be a fixed-time fade indefinitely.
         adsr_.prepare (static_cast<double> (hostSampleRate));
-        fontInvRate_ = 1.0f / static_cast<float> (hostSampleRate);
+        envInvRate_ = 1.0f / static_cast<float> (hostSampleRate);
     }
 
     // Push ADSR parameters only on change: the setters recompute the current
@@ -204,15 +204,23 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
     const auto loopStart = static_cast<std::int64_t>(loopStart_);
     const auto loopEnd = static_cast<std::int64_t>(loopEnd_);
 
+    // Modulation envelope destinations; zero depth skips the per-sample exp2.
+    const float modToPitch = sample_->modEnvToPitchCents;
+    const float modToFilter = sample_->modEnvToFilterCents;
+
     for (int i = 0; i < numSamples; ++i)
     {
-        const float fontEnv = fontTick();
+        const float fontEnv = volEnv_.tick (sample_->volumeEnvelope, envInvRate_);
+        const float modEnv = modEnv_.tick (sample_->modulationEnvelope, envInvRate_);
         const float env = adsr_.tick() * gain_ * fontEnv;
-        if ((env <= 0.0f && !adsr_.isActive()) || fontStage_ == FontStage::idle)
+        if ((env <= 0.0f && !adsr_.isActive()) || volEnv_.stage == StageEnv::Stage::idle)
         {
             active_ = false;
             break;
         }
+
+        if (modToFilter != 0.0f)
+            filter_.setCutoff (cutoffHz * std::exp2 (modEnv * modToFilter / 1200.0f), q);
 
         if (!looping)
         {
@@ -276,7 +284,8 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
 
         output[i] += sample;
 
-        phase_ += playRate_;
+        phase_ += playRate_ * (modToPitch != 0.0f
+            ? std::exp2 (modEnv * modToPitch / 1200.0f) : 1.0f);
 
         // Wrap the loop: once the read position passes loopEnd_, continue from
         // loopStart_ keeping the fractional part, so the interpolation phase is

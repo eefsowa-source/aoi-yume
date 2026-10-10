@@ -64,6 +64,10 @@ bool SF2Loader::loadFile(const juce::File& file)
                 sample.loopEnd = std::min (sample.loopEnd, maxFrame);
                 sample.loopStart = std::min (sample.loopStart, maxFrame - 1);
             }
+            // shortcut: continuous collapses into sustainThenRelease — the
+            // voice always exits the loop on release and plays the tail. If a
+            // bank's continuous loops must ring into release, carry loopMode
+            // through to the voice instead of this boolean.
             sample.loopEnabled = region.loopMode != x10::instrument::LoopMode::none;
             sample.filterCutoffHz = region.filterCutoffHz;
             sample.filterResonanceDb = region.filterResonanceDb;
@@ -73,6 +77,9 @@ bool SF2Loader::loadFile(const juce::File& file)
             sample.attenuationDb = region.attenuationDb;
             sample.exclusiveClass = region.exclusiveClass;
             sample.volumeEnvelope = region.volumeEnvelope;
+            sample.modulationEnvelope = region.modulationEnvelope;
+            sample.modEnvToPitchCents = region.modEnvToPitchCents;
+            sample.modEnvToFilterCents = region.modEnvToFilterCents;
 
             resampleToHostRate(sample);
 

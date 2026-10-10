@@ -31,6 +31,10 @@ struct Sample
     // The region's own volume envelope; runs alongside the UI ADSR so a
     // preset keeps its natural release tail under any panel setting.
     x10::instrument::Envelope volumeEnvelope {};
+    // Modulation envelope routed to pitch and/or filter cutoff, in cents.
+    x10::instrument::Envelope modulationEnvelope {};
+    float modEnvToPitchCents = 0.0f;
+    float modEnvToFilterCents = 0.0f;
     // Pitch mapping: the sample plays back untransposed when the played MIDI
     // note equals rootKey. tuneCents is a constant offset; scaleTuningCentsPerKey
     // is the per-key pitch step (100 = normal chromatic, 0 = pinned to rootKey).
@@ -71,20 +75,26 @@ private:
     float envPhase_ = 0.0f;
 
     x10::dsp::Adsr adsr_;
-    // Region volume envelope state, driven by the same noteOn/noteOff as the
-    // UI ADSR. Six linear stages (delay/attack/hold/decay/sustain/release).
-    enum class FontStage : std::uint8_t { delay, attack, hold, decay, sustain, release, idle };
-    FontStage fontStage_ = FontStage::idle;
-    float fontLevel_ = 0.0f;
-    float fontElapsedSec_ = 0.0f;
-    float fontReleaseFrom_ = 0.0f;
-    float fontInvRate_ = 1.0f / 48000.0f;
+    // Six-stage linear envelope (delay/attack/hold/decay/sustain/release),
+    // driven by the same noteOn/noteOff as the UI ADSR. One instance runs the
+    // region volume envelope, the other the modulation envelope.
+    struct StageEnv
+    {
+        enum class Stage : std::uint8_t { delay, attack, hold, decay, sustain, release, idle };
+        Stage stage = Stage::idle;
+        float level = 0.0f;
+        float elapsedSec = 0.0f;
+        float releaseFrom = 0.0f;
+
+        void noteOn() noexcept;
+        void noteOff() noexcept;
+        [[nodiscard]] float tick (const x10::instrument::Envelope& e, float invRate) noexcept;
+    };
+    StageEnv volEnv_;
+    StageEnv modEnv_;
+    float envInvRate_ = 1.0f / 48000.0f;
     // Playback gain from the region's attenuation, folded in at start().
     float gain_ = 1.0f;
-
-    void fontNoteOn() noexcept;
-    void fontNoteOff() noexcept;
-    [[nodiscard]] float fontTick() noexcept;
     // Bit-pattern hash of the last pushed envelope parameter block; see render()
     // for why we must not re-push identical values every block.
     std::uint32_t envParamHash_ = 0;
