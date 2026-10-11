@@ -182,15 +182,10 @@ void RomplerProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     const float sustainLevel = envSustainParam ? envSustainParam->load() / 100.0f : 0.7f;
     const float releaseMs    = envReleaseParam ? envReleaseParam->load()         : 80.0f;
 
+    float* outR = buffer.getNumChannels() > 1 ? buffer.getWritePointer(1) : nullptr;
     voicePool_->render(outL, numSamples, static_cast<int>(sampleRate_), driveDb, velToDriveDb,
                         curveId, filterRouting, filterOffsetCents,
-                        attackMs, decayMs, sustainLevel, releaseMs);
-
-    if (buffer.getNumChannels() > 1)
-    {
-        float* outR = buffer.getWritePointer(1);
-        juce::FloatVectorOperations::copy(outR, outL, numSamples);
-    }
+                        attackMs, decayMs, sustainLevel, releaseMs, outR);
 
     const auto tapeDriveParam = apvts_.getRawParameterValue(ParamIDs::busTapeDrive);
     const auto foldParam = apvts_.getRawParameterValue(ParamIDs::busFold);

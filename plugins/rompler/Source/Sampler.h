@@ -24,10 +24,12 @@ struct Sample
     bool loopEnabled = false;
     float filterCutoffHz = 19912.13f;
     float filterResonanceDb = 0.0f;
-    // From the region: playback gain (dB below unity), and the hi-hat-style
-    // choke group. pan is parsed but ignored while the render path is mono.
+    // From the region: playback gain (dB below unity), the hi-hat-style choke
+    // group, and pan (-1 hard left .. +1 hard right, linear law so centre
+    // keeps the same per-channel level as the old mono path).
     float attenuationDb = 0.0f;
     int exclusiveClass = 0;
+    float pan = 0.0f;
     // The region's own volume envelope; runs alongside the UI ADSR so a
     // preset keeps its natural release tail under any panel setting.
     x10::instrument::Envelope volumeEnvelope {};
@@ -62,9 +64,11 @@ public:
         return sample_ != nullptr ? sample_->exclusiveClass : 0;
     }
 
+    /** outputR: when non-null the voice renders stereo; otherwise L (panL_) only. */
     void render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
                 int curveId, int filterRouting, float filterOffsetCents,
-                float attackMs, float decayMs, float sustainLevel, float releaseMs) noexcept;
+                float attackMs, float decayMs, float sustainLevel, float releaseMs,
+                float* outputR = nullptr) noexcept;
 
 private:
     const Sample* sample_ = nullptr;
@@ -95,6 +99,9 @@ private:
     float envInvRate_ = 1.0f / 48000.0f;
     // Playback gain from the region's attenuation, folded in at start().
     float gain_ = 1.0f;
+    // Linear pan gains: panL_ = min(1, 1-pan), panR_ = min(1, 1+pan).
+    float panL_ = 1.0f;
+    float panR_ = 1.0f;
     // Bit-pattern hash of the last pushed envelope parameter block; see render()
     // for why we must not re-push identical values every block.
     std::uint32_t envParamHash_ = 0;
@@ -143,7 +150,8 @@ public:
 
     void render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
                 int curveId, int filterRouting, float filterOffsetCents,
-                float attackMs, float decayMs, float sustainLevel, float releaseMs) noexcept;
+                float attackMs, float decayMs, float sustainLevel, float releaseMs,
+                float* outputR = nullptr) noexcept;
 
 private:
     std::vector<Voice> voices_;

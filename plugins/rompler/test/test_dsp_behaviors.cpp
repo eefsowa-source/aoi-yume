@@ -586,3 +586,27 @@ TEST_CASE ("mod envelope to pitch doubles the cycle rate at sustain", "[dsp][voi
 
     REQUIRE (crossings (shifted, &modded) > static_cast<int> (crossings (flat, &base) * 1.5f));
 }
+
+TEST_CASE ("region pan steers the voice between channels", "[dsp][voice]")
+{
+    aod::VoicePool right, centre;
+    aod::Sample panned = makeTone();
+    panned.pan = 1.0f; // hard right: nothing on L, full signal on R
+    const aod::Sample middle = makeTone();
+
+    std::vector<float> l1 (static_cast<std::size_t> (kBlockSize)),
+                       r1 (static_cast<std::size_t> (kBlockSize)),
+                       l2 (static_cast<std::size_t> (kBlockSize)),
+                       r2 (static_cast<std::size_t> (kBlockSize));
+
+    right.start (&panned, 60, 0.8f);
+    centre.start (&middle, 60, 0.8f);
+    right.render  (l1.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f, r1.data());
+    centre.render (l2.data(), kBlockSize, kSampleRate, 0.0f, 0.0f, 0, 0, 0.0f, 5.0f, 300.0f, 0.7f, 80.0f, r2.data());
+
+    REQUIRE (blockPeak (l1.data(), kBlockSize) <= 1.0e-6f);
+    REQUIRE (blockPeak (r1.data(), kBlockSize) > 0.0f);
+    // Centre pan is identical on both channels, matching the old mono copy.
+    for (int i = 0; i < kBlockSize; ++i)
+        REQUIRE (std::abs (l2[static_cast<std::size_t> (i)] - r2[static_cast<std::size_t> (i)]) <= 1.0e-7f);
+}

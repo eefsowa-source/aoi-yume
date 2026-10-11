@@ -76,6 +76,7 @@ bool SF2Loader::loadFile(const juce::File& file)
             sample.scaleTuningCentsPerKey = region.scaleTuningCentsPerKey;
             sample.attenuationDb = region.attenuationDb;
             sample.exclusiveClass = region.exclusiveClass;
+            sample.pan = region.pan;
             sample.volumeEnvelope = region.volumeEnvelope;
             sample.modulationEnvelope = region.modulationEnvelope;
             sample.modEnvToPitchCents = region.modEnvToPitchCents;

@@ -34,6 +34,9 @@ void Voice::start(const Sample* sample, int midiNote, float velocity) noexcept
     playRate_ = std::pow (2.0, semitones / 12.0);
 
     gain_ = std::pow (10.0f, -sample->attenuationDb / 20.0f);
+    const float pan = std::clamp (sample->pan, -1.0f, 1.0f);
+    panL_ = std::min (1.0f, 1.0f - pan);
+    panR_ = std::min (1.0f, 1.0f + pan);
 
     adsr_.noteOn();
     volEnv_.noteOn();
@@ -141,7 +144,8 @@ float Voice::StageEnv::tick (const x10::instrument::Envelope& e, float invRate) 
 
 void Voice::render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
                     int curveId, int filterRouting, float filterOffsetCents,
-                    float attackMs, float decayMs, float sustainLevel, float releaseMs) noexcept
+                    float attackMs, float decayMs, float sustainLevel, float releaseMs,
+                    float* outputR) noexcept
 {
     if (!active_ || sample_ == nullptr || sample_->data.empty())
         return;
@@ -282,7 +286,9 @@ void Voice::render(float* output, int numSamples, int hostSampleRate, float driv
         if (filterRouting != 0) // Post: filter after drive
             sample = filter_.process (sample);
 
-        output[i] += sample;
+        output[i] += sample * panL_;
+        if (outputR != nullptr)
+            outputR[i] += sample * panR_;
 
         phase_ += playRate_ * (modToPitch != 0.0f
             ? std::exp2 (modEnv * modToPitch / 1200.0f) : 1.0f);
@@ -402,16 +408,19 @@ Voice* VoicePool::findFreeVoice() noexcept
 
 void VoicePool::render(float* output, int numSamples, int hostSampleRate, float driveDb, float velToDriveDb,
                         int curveId, int filterRouting, float filterOffsetCents,
-                        float attackMs, float decayMs, float sustainLevel, float releaseMs) noexcept
+                        float attackMs, float decayMs, float sustainLevel, float releaseMs,
+                        float* outputR) noexcept
 {
     std::fill(output, output + numSamples, 0.0f);
+    if (outputR != nullptr)
+        std::fill(outputR, outputR + numSamples, 0.0f);
 
     const auto limit = std::min (static_cast<std::size_t>(polyphony_), voices_.size());
     for (std::size_t i = 0; i < limit; ++i)
         if (voices_[i].isActive())
             voices_[i].render(output, numSamples, hostSampleRate, driveDb, velToDriveDb,
                               curveId, filterRouting, filterOffsetCents,
-                              attackMs, decayMs, sustainLevel, releaseMs);
+                              attackMs, decayMs, sustainLevel, releaseMs, outputR);
 }
 
 } // namespace aod
